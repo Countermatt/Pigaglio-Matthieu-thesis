@@ -15,19 +15,21 @@
 - Thesis outline
 
 ## Part I — Background and State of the Art
+
 1. **Blockchain fundamentals**
    - Distributed ledgers
    - consensus (PoW, PoS, BFT variants)
    - Transaction and state model (UTXO vs. account-based, e.g., Ethereum)
    - Smart contracts and execution environments (EVM and alternatives)
+   - State of the art on blockchains
 
 2. **The scalability problem**
    - Throughput, latency, and full-node cost bottlenecks
    - On-chain scaling: sharding (network, transaction, state sharding)
    - Off-chain / Layer 2 scaling: rollups (optimistic, zk), state channels, sidechains
-
+   - State of the art existing solutions
+   
 3. **Related work synthesis**
-   - Comparative taxonomy of sharding and L2+DAS designs
    - Open challenges motivating this thesis
 
 ## Part II — Workload Analysis
@@ -37,6 +39,8 @@ Need to update result with actual data
 
 1. **Motivation**
    - Blockchain designs (sharding, light nodes, parallel execution) implicitly assume locality properties in transaction workloads
+   - Need to know the nature of transactions to efficiently design sharding and L2 solutions
+   - Objective is to predict future workload based on past activity
 
 2. **Methodology**
    - Dataset: full Ethereum transaction history (largest available transactional workload)
@@ -64,6 +68,7 @@ Need to update result with actual data
 2. **Problem with prior explicit-placement work**
    - Assigning explicit placement rules for *all* accounts is impractical at scale (~400M Ethereum accounts → ~400 MB of metadata every node must maintain/synchronize)
    - Uncontrolled/centralized placement decisions raise security and fairness issues (selfish optimization: an actor biases placement to favor its own accounts/transactions at others' expense)
+
 3. **Design: SOAPS**
    - **Bounded placement rules**: Partial Explicit Placement Rules (PEPR) — explicit shard assignment only for the $K$ accounts with the greatest impact on cross-shard traffic; hash-based placement retained for the rest
 
@@ -108,6 +113,9 @@ https://arxiv.org/pdf/2507.00824
    - Connects back to Part II: node-level and account-level access patterns/hot spots inform how sampling and fetching load could be further balanced across the network
 
 ## Part V — Compare the two solution
+
+1. **Comparative between sharding and L2+DAS designs**
+
 
 
 ## General Conclusion
