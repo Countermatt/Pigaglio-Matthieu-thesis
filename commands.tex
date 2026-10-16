@@ -58,3 +58,29 @@
 % Line spacing (triple)
 \usepackage{setspace}
 \setstretch{3}
+
+% Comparison tables (ported from the SOAPS paper)
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{colortbl}
+\usepackage{pifont}
+\definecolor{tickgreen}{RGB}{0,130,60}
+\definecolor{tickred}{RGB}{190,30,30}
+\definecolor{verylightgray}{gray}{0.95}
+\newcommand{\yestick}{{\color{tickgreen}\ding{51}}}
+\newcommand{\notick}{{\color{tickred}\ding{55}}}
+\newcommand{\partialtick}{{\color{blue}\textbf{$\sim$}}}
+
+% Inline, toggleable review notes (same system as the SOAPS paper)
+% Set showcomments to false to hide every note in the PDF.
+\usepackage{ifthen}
+\newboolean{showcomments}
+\setboolean{showcomments}{true}
+\ifthenelse{\boolean{showcomments}}
+{\newcommand{\mynote}[3]{%
+    \protect\fbox{\bfseries\sffamily\scriptsize#1}
+    {\small\textsf{\emph{\color{#3}{#2}}}}}}
+{\newcommand{\mynote}[3]{}}
+\newcommand{\er}[1]{\mynote{Etienne}{#1}{blue}}
+\newcommand{\mat}[1]{\mynote{Matthieu}{#1}{orange}}
+\newcommand{\TODO}[1]{\mynote{TODO}{#1}{red}}

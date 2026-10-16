@@ -12,232 +12,262 @@
 % 	\item Order of the chapter: ledgers, consensus, Ethereum PoS in detail, state models, execution.
 % \end{itemize}
 
+This chapter covers the blockchain concepts that the rest of the thesis depends on.
+It is not a survey: each section is here because a later part needs it, and approaches to scalability are left to \autoref{ch:bg:scalability}.
+Generic material is kept short.
+Ethereum gets more space, because all three contributions target it: Part~II analyzes its transaction workload, Part~III designs state sharding for it, and Part~IV fits data availability sampling into its consensus.
+
+The chapter goes from the general model to Ethereum's specifics.
+\autoref{sec:bg:ledgers} describes a distributed ledger as a replicated state machine.
+It introduces blocks, hash chaining, Merkle trees, the roles that nodes play, and the full replication that limits throughput.
+\autoref{sec:bg:consensus} explains how nodes agree on the order of transactions, covering the fault and network models, BFT protocols, proof-of-work and proof-of-stake.
+\autoref{sec:bg:eth-pos} then details Ethereum's proof-of-stake: validators, slots and epochs, committees and attestations, the fork-choice rule, and the rewards and penalties that keep validators honest.
+Part~III builds on these committees and penalties, and Part~IV has to fit within the timing of a slot.
+\autoref{sec:bg:state-model} compares the UTXO and account-based models.
+The state model determines what a transaction accesses, and so when two transactions conflict and how the state can be split between shards.
+Finally, \autoref{sec:bg:execution} presents smart contracts and the Ethereum Virtual Machine.
+It shows how calls between contracts create the dependencies between accounts that Parts~II and~III study.
+
 \section{Distributed Ledgers}\label{sec:bg:ledgers}
 
-A distributed ledger is an append-only log of transactions, which is replicated by a set of nodes that do not trust each other.
-Bitcoin~\cite{nakamoto2008bitcoin} was, in 2009, the first ledger of this kind to work in an open setting, and its transactions are transfers of a native currency.
-In 2015, Ethereum~\cite{wood2014ethereum} extended the model so that transactions can call programs (smart contracts) whose code and storage are kept in the replicated state.
-We describe here the elements of this model that are used in the rest of the thesis, and leave the question of how nodes agree on the content of the log to \autoref{sec:bg:consensus}.
+A distributed ledger is an append-only log of transactions, replicated by nodes that do not trust each other.
+Bitcoin~\cite{nakamoto2008bitcoin}, launched in 2009, was the first such ledger to work in an open setting.
+Its transactions transfer a native currency.
+Ethereum~\cite{wood2014ethereum} followed in 2015 and let transactions call programs, smart contracts, whose code and storage live in the replicated state.
+This section covers the parts of this model that the rest of the thesis uses; how nodes agree on the content of the log is left to \autoref{sec:bg:consensus}.
 
 \paragraph{State machine replication.}
-A ledger can be seen as a case of state machine replication~\cite{schneider1990smr}.
-Each node holds a copy of a state $S$ (in the simplest case, the balance of every account), and a transaction $tx$ changes it through a transition function, $S' = \delta(S, tx)$.
-If all nodes start from the same initial state $S_0$, the \emph{genesis} state, and apply the same sequence of transactions $tx_1, \ldots, tx_n$, they all obtain
+A ledger is a form of state machine replication~\cite{schneider1990smr}.
+Each node holds a copy of a state $S$ (in the simplest case, the balance of every account), and a transaction $tx$ updates it through a transition function, $S' = \delta(S, tx)$.
+Nodes that start from the same \emph{genesis} state $S_0$ and apply the same transactions $tx_1, \ldots, tx_n$ all end up with
 \[
 	S_n = \delta(\ldots\delta(\delta(S_0, tx_1), tx_2)\ldots, tx_n).
 \]
-For this to hold, $\delta$ has to be deterministic.
-The execution environments of blockchains that support smart contracts (\autoref{sec:bg:execution}) are designed with this in mind, and give programs no access to local clocks, floating-point arithmetic, or external services, all of which could give different results on different machines.
-Consequently, nodes need not exchange the state to remain consistent, since it can be recomputed from the log; they only need to agree on the order of transactions, which is the role of consensus.
+This only works if $\delta$ is deterministic.
+Smart contract execution environments (\autoref{sec:bg:execution}) are built around this requirement: programs get no local clock, no floating-point arithmetic and no access to external services, since any of these could give different results on different machines.
+The state itself never needs to be exchanged, because any node can recompute it from the log.
+Nodes only have to agree on the order of transactions, and that is the job of consensus.
 
 \paragraph{Blocks and hash chaining.}
-Transactions are added to the log in batches, called blocks.
-A block is made of a body, which holds the ordered list of transactions, and a header with metadata.
-The header typically contains the hash of the parent header, a timestamp, and short commitments to the content of the block, such as the root of a Merkle tree over its transactions and, in some ledgers, a commitment to the state obtained after executing the block.
+Transactions enter the log in batches called blocks.
+A block has a body, the ordered list of its transactions, and a header with metadata: typically the hash of the parent header, a timestamp, and short commitments to the content of the block, such as the root of a Merkle tree over its transactions and, in some ledgers, a commitment to the state after the block is executed.
 
-Because each header includes the hash of its parent, the blocks form a hash chain back to genesis.
-Linking documents through hashes to detect tampering is an older idea, used for digital timestamping~\cite{haber1991timestamp}.
-Under the usual assumption that the hash function is collision resistant, the hash of the most recent header fixes the whole history.
-Changing a transaction in an old block changes the hash of that block, then the parent hash stored in its child, and so on up to the latest header, so a node that knows a recent header will notice the change.
+Since each header contains the hash of its parent, blocks form a hash chain back to genesis.
+The idea predates blockchains and was first used to timestamp digital documents~\cite{haber1991timestamp}.
+If the hash function is collision resistant, the most recent header fixes the whole history.
+Altering a transaction in an old block changes that block's hash, hence the parent hash stored in its child, and so on up to the latest header.
+Any node that knows a recent header sees the change.
 Hash chaining, however, only makes a rewrite detectable.
-An attacker can still produce a different, internally consistent chain, and selecting one chain among several valid candidates is again the role of consensus (\autoref{sec:bg:consensus}).
+Nothing stops an attacker from building a different chain that is internally consistent, and choosing among several valid chains is again a matter for consensus (\autoref{sec:bg:consensus}).
 
 \paragraph{Merkle trees.}
-These commitments are usually roots of Merkle trees~\cite{merkle1987digital}.
-The leaves of a Merkle tree are hashes of data items, and every inner node is the hash of its children, so the root depends on every leaf.
-A proof that an item belongs to the tree consists of the sibling hashes along the path from its leaf to the root.
-Its size is logarithmic in the number of leaves, and anyone who knows the root can check it.
-The same technique applies to the state.
-If the header contains the root of a tree built over all state entries, such as account balances or the storage of contracts, then any single entry can be proven against that root.
-How the state is organized in practice depends on the transaction and state model of the ledger, which we discuss in \autoref{sec:bg:state-model}.
+The commitments in the header are usually roots of Merkle trees~\cite{merkle1987digital}.
+Leaves are hashes of data items, and each inner node hashes its children, so the root depends on every leaf.
+To prove that an item is in the tree, it is enough to give the sibling hashes on the path from its leaf to the root.
+The proof grows logarithmically with the number of leaves, and anyone who knows the root can check it.
+The state can be committed the same way.
+When the header holds the root of a tree over all state entries (account balances, contract storage), any single entry can be proven against it.
+How the state is laid out in practice depends on the transaction and state model of the ledger, the topic of \autoref{sec:bg:state-model}.
 
 \paragraph{Permissioned and permissionless ledgers.}
-Ledgers also differ in who is allowed to maintain them.
-In a permissioned ledger such as Hyperledger Fabric~\cite{androulaki2018hyperledger}, participants are known in advance and authenticated, and classical Byzantine fault-tolerant protocols (\autoref{sec:bg:consensus:bft}) can be used as they are, since these assume a fixed set of $n$ nodes with at most $f$ faulty ones.
-Public blockchains such as Bitcoin are permissionless: anyone can join or leave, and an identity is a public key that costs nothing to generate.
-A single participant can then create as many identities as it wants (a Sybil attack~\cite{douceur2002sybil}), and votes cannot simply be counted per identity.
-Voting power is instead tied to a resource that is hard to obtain, computation in proof-of-work (\autoref{sec:bg:consensus:pow}) or locked stake in proof-of-stake (\autoref{sec:bg:consensus:pos}).
+Ledgers also differ in who maintains them.
+In a permissioned ledger such as Hyperledger Fabric~\cite{androulaki2018hyperledger}, participants are known and authenticated in advance.
+Classical Byzantine fault-tolerant protocols (\autoref{sec:bg:consensus:bft}) then apply directly, since they assume a fixed set of $n$ nodes of which at most $f$ are faulty.
+Public blockchains such as Bitcoin are permissionless.
+Anyone can join or leave, and an identity is just a public key, free to generate.
+Nothing prevents one participant from creating many identities (a Sybil attack~\cite{douceur2002sybil}), so votes cannot be counted per identity.
+Voting power is tied instead to a resource that is hard to obtain: computation in proof-of-work (\autoref{sec:bg:consensus:pow}), locked stake in proof-of-stake (\autoref{sec:bg:consensus:pos}).
 
-This thesis only considers permissionless ledgers.
-For our contributions, this means that the mechanisms we add, namely the placement of state on shards in Part~III and the assignment of data to nodes in Part~IV, have to work with open membership and with some malicious participants.
-These decisions must also be verifiable by any node, and resistant to bias from participants who would benefit from a particular outcome.
+We only consider permissionless ledgers in this thesis.
+This constrains the mechanisms we add, namely the placement of state on shards in SOAPS (Part~III) and the assignment of data to nodes in PANDAS (Part~IV).
+Both must work with open membership and with some participants acting maliciously.
+Any node must be able to verify their outcome, and participants who would gain from a particular outcome must not be able to bias it.
 
 \paragraph{Node roles.}
-Not all nodes do the same work~\cite{chatzigiannis2022sok}.
-A full node checks every new block by re-executing its transactions and verifying that the result matches the commitments in the header.
-It keeps the current state, and possibly a limited window of recent states.
-A new full node does not usually replay the chain from genesis: it starts from a recent checkpoint, downloads the corresponding state, and validates blocks from that point on.
-Under proof-of-stake, the node has to obtain this checkpoint from a source it trusts, which is related to the weak subjectivity issue discussed in \autoref{sec:bg:consensus:pos}.
-An archive node is a full node that also keeps all historical states, so that it can answer queries such as the balance of an account at a given past block, at the price of a much larger disk footprint.
+Nodes do not all do the same work~\cite{chatzigiannis2022sok}.
+A full node checks each new block by re-executing its transactions and comparing the result with the commitments in the header.
+It stores the current state, sometimes with a short window of recent ones.
+Joining nodes rarely replay the chain from genesis.
+They start from a recent checkpoint, download the matching state, and validate blocks from there; under proof-of-stake, the checkpoint must come from a trusted source, an issue tied to weak subjectivity (\autoref{sec:bg:consensus:pos}).
+An archive node additionally keeps every historical state, so it can answer queries such as the balance of an account at some past block, at the cost of a much larger disk footprint.
 Validators (miners under proof-of-work) are full nodes that also propose and vote on blocks; under proof-of-stake, they are the participants that have locked stake (\autoref{sec:bg:consensus:pos}).
-Finally, light clients only follow block headers and check individual values with Merkle proofs~\cite{chatzigiannis2022sok}.
-They do not re-execute transactions, and instead assume that most consensus participants are honest (\autoref{sec:bg:workload:light}).
+At the other end, light clients follow only block headers and check individual values with Merkle proofs~\cite{chatzigiannis2022sok}.
+They execute nothing and rely on most consensus participants being honest (\autoref{sec:bg:workload:light}).
 
 \paragraph{Peer-to-peer network.}
-Nodes are connected by a peer-to-peer overlay in which each node maintains a bounded number of connections.
-Transactions and blocks are propagated by gossip, where a node that receives a valid message forwards it to some of its neighbors~\cite{demers1987epidemic}.
-Peers are found through a discovery protocol, often a distributed hash table such as Kademlia~\cite{maymounkov2002kademlia}.
-To keep the bandwidth cost bounded, practical gossip protocols send full messages only to a small set of neighbors and announce them to the others with short metadata.
+Nodes form a peer-to-peer overlay in which each keeps a bounded number of connections.
+Transactions and blocks spread by gossip: a node that receives a valid message forwards it to some of its neighbors~\cite{demers1987epidemic}.
+Peers find each other through a discovery protocol, often a distributed hash table such as Kademlia~\cite{maymounkov2002kademlia}.
+To keep bandwidth in check, practical gossip protocols push full messages to a few neighbors and only announce them, with short metadata, to the rest.
 
-The network affects the protocol because the propagation delay of blocks bounds the rate at which blocks can be produced without degrading security~\cite{garay2015backbone,gervais2016security}.
-Block intervals are therefore chosen to be large compared to this delay.
-Part~IV works at this level, since its goal is to distribute and sample data over the peer-to-peer network within the time that consensus allows.
+The network matters for security.
+How fast blocks propagate bounds how fast they can be produced before security degrades~\cite{garay2015backbone,gervais2016security}, which is why block intervals are set well above the propagation delay.
 
 \paragraph{Full replication.}
-In the model described so far, every full node stores the whole state and re-executes every transaction of every new block.
-This full replication removes the need to trust other nodes, but it also implies that the capacity of the system does not increase with the number of nodes.
-Throughput is limited by what a single node, run by a regular participant, can download, store, and execute.
-Larger or more frequent blocks would raise this limit, but they would also increase the cost of running a node, thereby reducing the number of participants able to do so, and slow down block propagation, which results in more forks and weaker security~\cite{gervais2016security}.
-\autoref{ch:bg:scalability} discusses this problem and the main approaches to it.
-This thesis builds on one of them, sharding, in which each node only processes a subset of the transactions and of the data.
+In the model so far, every full node stores the whole state and re-executes every transaction of every block.
+No node has to trust another, but adding nodes adds no capacity.
+Throughput is capped by what one node, run by an ordinary participant, can download, store and execute.
+Larger or more frequent blocks would lift the cap, at a price.
+Running a node would become more expensive, so fewer participants could afford it, and blocks would propagate more slowly, which means more forks and weaker security~\cite{gervais2016security}.
+\autoref{ch:bg:scalability} discusses this problem and the main ways around it.
+This thesis builds on one of them, sharding, where each node handles only a subset of the transactions and of the data.
 
 \section{Consensus}\label{sec:bg:consensus}
 
-As seen in \autoref{sec:bg:ledgers}, nodes that apply the same transactions in the same order end up with the same state.
-The role of the consensus protocol is to make them agree on this order, block after block, even though some of them may be faulty or malicious and messages may be delayed by the network~\cite{lamport1982byzantine}.
+Nodes that apply the same transactions in the same order reach the same state (\autoref{sec:bg:ledgers}).
+A consensus protocol makes them agree on that order, block after block, even when some nodes are faulty or malicious and the network delays messages~\cite{lamport1982byzantine}.
 
 \paragraph{Fault and network models.}
-Consensus protocols for blockchains generally assume \emph{Byzantine} faults, meaning that a faulty node may behave arbitrarily.
-It can stop responding, send wrong messages, collude with other faulty nodes, or \emph{equivocate}, i.e., send conflicting messages to different nodes (e.g., votes for two different blocks at the same height).
-Protocols also differ in what they assume about the network.
-In the synchronous model, every message is delivered within a known bound $\Delta$.
-In the asynchronous model, there is no such bound, and Fischer, Lynch, and Paterson showed that no deterministic protocol can then guarantee agreement if even one node may crash~\cite{fischer1985impossibility}.
-The partially synchronous model lies in between: the network may behave asynchronously for some time, but eventually delivers messages within a bound, and agreement is possible as long as fewer than a third of the nodes are Byzantine~\cite{dwork1988partial}.
-Longest-chain protocols assume a synchronous network~\cite{garay2015backbone}, whereas most BFT protocols target partial synchrony~\cite{castro1999pbft,yin2019hotstuff}.
+Blockchain consensus protocols generally assume \emph{Byzantine} faults: a faulty node may do anything.
+It may stop responding, send wrong messages, collude with other faulty nodes, or \emph{equivocate}, i.e., send conflicting messages to different nodes, such as votes for two different blocks at the same height.
+Assumptions about the network vary more.
+The synchronous model guarantees delivery within a known bound $\Delta$.
+The asynchronous model gives no bound at all, and Fischer, Lynch, and Paterson proved that in this model no deterministic protocol can guarantee agreement if even a single node may crash~\cite{fischer1985impossibility}.
+Partial synchrony sits in between.
+The network may be asynchronous for a while but eventually delivers messages within a bound, and agreement is then possible with fewer than a third of Byzantine nodes~\cite{dwork1988partial}.
+Longest-chain protocols assume synchrony~\cite{garay2015backbone}; most BFT protocols target partial synchrony~\cite{castro1999pbft,yin2019hotstuff}.
 
 \paragraph{Safety and liveness.}
-The properties expected from consensus are usually split in two.
-\emph{Safety} requires that honest nodes never confirm two conflicting blocks, so that a confirmed transaction is never reverted.
-\emph{Liveness} requires that the protocol keeps making progress, so that a valid transaction submitted by an honest client is eventually included.
-These two properties are in tension when the network can be partitioned.
-A protocol that keeps producing blocks on both sides of a partition cannot also guarantee that these blocks will never conflict.
-Some protocols therefore combine a chain that keeps growing under any conditions with a slower finality mechanism that only confirms a prefix of this chain when enough participants agree on it~\cite{neu2021ebb}.
-Ethereum follows this design, as we detail in \autoref{sec:bg:eth-pos}.
+Two properties are expected from consensus.
+\emph{Safety} means that honest nodes never confirm two conflicting blocks, so a confirmed transaction is never reverted.
+\emph{Liveness} means that the protocol keeps making progress, so a valid transaction from an honest client is eventually included.
+When the network can be partitioned, the two pull against each other.
+A protocol that keeps producing blocks on both sides of a partition cannot also promise that those blocks never conflict.
+One answer is to run two layers: a chain that keeps growing under any conditions, and a slower finality mechanism that confirms a prefix of it only once enough participants agree~\cite{neu2021ebb}.
+Ethereum is built this way (\autoref{sec:bg:eth-pos}).
 
 \paragraph{Sybil resistance.}
-Since votes in a permissionless ledger are weighted by a costly resource rather than counted per identity (\autoref{sec:bg:ledgers}), security assumptions are expressed in terms of this resource, for instance that honest participants control a majority of the computing power in proof-of-work (\autoref{sec:bg:consensus:pow}), or more than two thirds of the stake in proof-of-stake (\autoref{sec:bg:consensus:pos}).
-Classical Byzantine fault-tolerant protocols (\autoref{sec:bg:consensus:bft}) do not provide Sybil resistance by themselves, but they are often run on top of proof-of-stake, by a committee selected according to stake.
+Because votes in a permissionless ledger are weighted by a costly resource and not counted per identity (\autoref{sec:bg:ledgers}), security assumptions are stated in terms of that resource: honest participants hold a majority of the computing power in proof-of-work (\autoref{sec:bg:consensus:pow}), or a majority of the stake in proof-of-stake, more than two thirds when finality comes from a BFT-style vote as in Ethereum (\autoref{sec:bg:consensus:pos}).
+Classical BFT protocols (\autoref{sec:bg:consensus:bft}) offer no Sybil resistance on their own.
+In practice they are often run on top of proof-of-stake, by a committee chosen according to stake.
+
+\subsection{BFT Variants}\label{sec:bg:consensus:bft}
+
+Classical Byzantine fault-tolerant (BFT) protocols, from PBFT~\cite{castro1999pbft} onward, assume a fixed, known set of $n$ nodes, at most $f$ of them Byzantine, with $n \geq 3f+1$.
+Decisions need a \emph{quorum} of $2f+1$ nodes.
+Two quorums overlap in at least $f+1$ nodes, hence in at least one honest node, and an honest node never votes for two conflicting values.
+Two conflicting decisions can thus never both reach a quorum.
+In PBFT, a leader proposes a value and the nodes agree on it in three phases: pre-prepare, prepare, and commit.
+A faulty or slow leader is replaced through a \emph{view change}~\cite{castro1999pbft}.
+Unlike in longest-chain protocols, finality is immediate: a decision is never reverted as long as the bound on $f$ holds.
+
+The cost is communication.
+PBFT has every node send its votes to every other node, $O(n^2)$ messages per decision, which in practice limits the number of participants.
+HotStuff~\cite{yin2019hotstuff} brings this down to $O(n)$: the leader collects the votes and combines them into one threshold signature.
+Aggregatable signatures such as BLS~\cite{boneh2001short,boneh2003aggregate} serve the same purpose, turning thousands of votes into a single signature checked in one operation.
+
+Sharded blockchains such as OmniLedger~\cite{omniLedger} and RapidChain~\cite{rapidchain} run a BFT protocol inside each shard, among the committee assigned to it.
+Committee size is then a trade-off.
+Small committees agree faster, but they are more likely, by chance, to have more than a third of malicious members.
+\autoref{sec:bg:sharding} comes back to this.
 
 \subsection{Proof-of-Work}\label{sec:bg:consensus:pow}
 
-Proof-of-work was originally proposed to limit spam by requiring a small computation for every email~\cite{dwork1992pricing}, and Bitcoin used it to elect who appends the next block~\cite{nakamoto2008bitcoin}.
-To produce a valid block, a miner has to find a value (nonce) such that the hash of the block header falls below a target.
-The only known way to do so is to try values one after the other, so the probability that a given miner finds the next block is proportional to its share of the total computing power.
-The target is adjusted periodically so that blocks are produced at a roughly constant rate, every ten minutes on average in Bitcoin.
+Proof-of-work was first proposed against spam, as a small computation required for each email~\cite{dwork1992pricing}.
+Bitcoin turned it into a way to elect who appends the next block~\cite{nakamoto2008bitcoin}.
+A miner produces a valid block by finding a nonce for which the hash of the block header falls below a target.
+No shortcut is known, so miners try values one by one, and the chance of finding the next block is proportional to one's share of the total computing power.
+The target is adjusted periodically to keep the block rate roughly constant, at one block every ten minutes on average in Bitcoin.
 
-Two miners may find a block at nearly the same time, in which case the chain temporarily splits into two branches, or \emph{forks}.
-Nodes resolve forks with a \emph{fork-choice rule}.
-Bitcoin uses the longest chain rule, or more precisely the chain with the most accumulated work, and miners extend the branch selected by this rule.
-GHOST~\cite{sompolinsky2015ghost} proposed instead to follow the heaviest subtree, which also counts the blocks on discarded branches and remains secure at higher block rates.
-The fork-choice rules of later proof-of-stake protocols build on this idea (\autoref{sec:bg:eth-pos:forkchoice}).
+When two miners find a block at nearly the same time, the chain splits into two branches, or \emph{forks}.
+A \emph{fork-choice rule} decides which branch to follow.
+Bitcoin's is the longest chain rule (more precisely, the chain with the most accumulated work), and miners build on the branch it selects.
+GHOST~\cite{sompolinsky2015ghost} follows the heaviest subtree instead.
+Blocks on discarded branches then still count, and the protocol stays secure at higher block rates.
+Proof-of-stake fork-choice rules later built on this idea (\autoref{sec:bg:eth-pos:forkchoice}).
 
-Under these rules, finality is only probabilistic.
-A block can always be reverted by a heavier branch, but the probability of this decreases exponentially with the number of blocks built on top of it, which is why users wait for several confirmations.
-The Bitcoin backbone analysis~\cite{garay2015backbone} shows that the protocol is secure if honest miners hold a majority of the computing power and if blocks propagate quickly compared to the block interval.
-When blocks are larger or produced more often, more forks occur, and the computing power spent on discarded branches no longer contributes to security~\cite{gervais2016security}.
-Throughput cannot therefore be increased simply by changing these parameters, which is the starting point of \autoref{ch:bg:scalability}.
-Proof-of-work also has a high energy cost, since security is proportional to the computation spent by miners.
+Finality under these rules is only probabilistic.
+A heavier branch can always revert a block, but the probability drops exponentially with the number of blocks on top of it, hence the usual advice to wait for several confirmations.
+The Bitcoin backbone analysis~\cite{garay2015backbone} proves the protocol secure when honest miners hold a majority of the computing power and blocks propagate quickly relative to the block interval.
+Larger or more frequent blocks cause more forks, and the work spent on discarded branches no longer protects the chain~\cite{gervais2016security}.
+Throughput cannot simply be raised by tuning these parameters, and \autoref{ch:bg:scalability} starts from this observation.
+Proof-of-work is also energy-hungry, since security grows with the computation miners spend.
 
 \subsection{Proof-of-Stake}\label{sec:bg:consensus:pos}
 
 In proof-of-stake, participants called \emph{validators} lock an amount of currency, their \emph{stake}, and their weight in the protocol is proportional to it.
-Validators are rewarded for proposing blocks and voting correctly.
-Ouroboros~\cite{kiayias2017ouroboros} and Algorand~\cite{gilad2017algorand} are two examples with formal security proofs.
-Ouroboros keeps a longest-chain structure and selects block producers according to stake.
-Algorand selects small committees by cryptographic sortition, and each committee runs a Byzantine agreement protocol to decide on a block.
+They earn rewards for proposing blocks and voting correctly.
+Ouroboros~\cite{kiayias2017ouroboros} and Algorand~\cite{gilad2017algorand} both come with formal security proofs, but take different routes.
+Ouroboros keeps a longest-chain structure and picks block producers according to stake.
+Algorand draws small committees by cryptographic sortition, and each committee decides on a block with a Byzantine agreement protocol.
 
-Because the stake is held by the protocol itself, misbehavior can be punished directly.
-If a validator equivocates (e.g., by signing two different blocks for the same position), the two signed messages are a proof of misbehavior that identifies the culprit~\cite{sheng2021forensics}.
-Anyone can include this proof in a block, and the protocol then destroys part of the validator's stake, which is called \emph{slashing}.
-Security therefore rests on economic incentives, since an attack requires a large share of the stake and exposes that stake to slashing.
-We come back to rewards and slashing in \autoref{sec:bg:eth-pos:safeguards}, as Part~III relies on them.
+Since the protocol holds the stake, it can punish misbehavior directly.
+A validator that equivocates, for instance by signing two different blocks for the same position, produces two signed messages that together prove the fault and identify who committed it~\cite{sheng2021forensics}.
+Anyone can put this proof in a block, and the protocol then destroys part of the validator's stake.
+This is called \emph{slashing}.
+Security rests on economics: an attack needs a large share of the stake and puts that stake at risk.
+SOAPS (Part~III) relies on rewards and slashing, and \autoref{sec:bg:eth-pos:safeguards} describes how Ethereum implements them.
 
-Proof-of-stake protocols need to select, at each step, the proposer of the next block and the members of the committees that vote on it.
-This selection is done using randomness that is itself produced by the protocol~\cite{gilad2017algorand}.
-If participants can predict this randomness long in advance, they can prepare attacks on the selected nodes, and if they can influence it, they can increase their chances of being selected for positions that benefit them.
-Such manipulation has been shown to be possible in practice~\cite{nagy2025forking}.
-Our designs face the same issue, since both assign tasks to nodes based on this randomness (\autoref{sec:bg:eth-pos:committees}).
+At each step, a proof-of-stake protocol must pick the proposer of the next block and the committees that vote on it, using randomness produced by the protocol itself~\cite{gilad2017algorand}.
+If this randomness is predictable long in advance, attackers can prepare against the selected nodes.
+If participants can influence it, they can steer the selection toward positions that benefit them, and this has been shown to work in practice~\cite{nagy2025forking}. \mat{CHECK: that Nagy et al.\ show the manipulation in practice (on mainnet) and not only in principle.}
+SOAPS and PANDAS inherit the problem, since both assign tasks to nodes from this randomness (\autoref{sec:bg:eth-pos:committees}).
 
-Proof-of-stake also raises some issues that do not exist with proof-of-work.
-Since producing a block costs almost nothing, a validator could vote on every competing branch at no cost, the so-called \emph{nothing-at-stake} problem, which slashing is designed to prevent.
-Validators that have withdrawn their stake can no longer be slashed, but their old keys can still be used to sign an alternative history starting from far in the past, which is called a \emph{long-range attack}.
-As a consequence, a node joining the network cannot tell the correct chain from such an alternative using only the genesis block, and has to obtain a recent checkpoint from a source it trusts.
-This assumption is known as \emph{weak subjectivity}.
-
-\subsection{BFT Variants}\label{sec:bg:consensus:bft}
-
-Classical Byzantine fault-tolerant (BFT) protocols, starting with PBFT~\cite{castro1999pbft}, assume a fixed and known set of $n$ nodes, of which at most $f$ are Byzantine, with $n \geq 3f+1$.
-Decisions are taken by \emph{quorums} of $2f+1$ nodes.
-Any two such quorums share at least $f+1$ nodes, and therefore at least one honest node, which never votes for two conflicting values.
-Two conflicting decisions can thus never both gather a quorum.
-In PBFT, a leader proposes a value, and the nodes agree on it in three phases (pre-prepare, prepare, and commit).
-If the leader is faulty or too slow, the nodes run a \emph{view change} to replace it~\cite{castro1999pbft}.
-Unlike longest-chain protocols, BFT protocols give immediate finality: once a decision is taken, it is never reverted as long as the bound on $f$ holds.
-
-The main limitation of these protocols is the number of messages they exchange.
-In PBFT, every node sends its votes to every other node, so each decision requires $O(n^2)$ messages, which limits the number of participants in practice.
-HotStuff~\cite{yin2019hotstuff} reduces this cost to $O(n)$ per decision by having the leader collect the votes and combine them into a single threshold signature.
-Signature aggregation schemes such as BLS~\cite{boneh2001short} are used in the same way to combine thousands of votes into a single signature that can be verified at once.
-
-Sharded blockchains such as OmniLedger~\cite{omniLedger} and RapidChain~\cite{rapidchain} run a BFT protocol inside each shard, among a committee of nodes assigned to it.
-Smaller committees reach agreement faster, but they are more likely to contain more than a third of malicious members by chance.
-We discuss this trade-off between committee size and security in \autoref{sec:bg:sharding}.
+Two further problems are specific to proof-of-stake.
+Signing a block costs nothing, so a validator could vote on every competing branch; slashing exists to rule out this \emph{nothing-at-stake} behavior.
+Slashing has a blind spot, though.
+Once validators have withdrawn, their old keys can still sign an alternative history from far in the past (a \emph{long-range attack}).
+A node joining the network cannot tell such a history from the real one using the genesis block alone, and needs a recent checkpoint from a source it trusts, an assumption called \emph{weak subjectivity}.
 
 \section{Ethereum Proof-of-Stake}\label{sec:bg:eth-pos}
 
-The contributions of this thesis target Ethereum, and they depend on how its consensus protocol works.
-Part~III builds on its validator committees and on its penalties, and Part~IV has to fit in the timing of its slots.
-We therefore describe it in more detail than the protocols of \autoref{sec:bg:consensus}.
-Unless stated otherwise, the parameters given here come from the consensus specifications~\cite{ethconsensusspecs}.
+All three contributions target Ethereum, and two of them depend directly on its consensus.
+SOAPS (Part~III) builds on its committees and penalties, and PANDAS (Part~IV) must fit in the timing of its slots.
+This section goes into more detail than \autoref{sec:bg:consensus} for that reason.
+Unless stated otherwise, parameters come from the consensus specifications~\cite{ethconsensusspecs}.
 
-Ethereum started with proof-of-work, and switched to proof-of-stake in September 2022, in an upgrade known as \emph{the Merge}.
-Since then, an Ethereum node runs two separate programs.
-The \emph{consensus client} runs the \emph{beacon chain}, which manages the set of validators, assigns them to committees, and decides which blocks are part of the chain and which are final~\cite{schwarzschilling2022three}.
-The \emph{execution client} keeps the state and the pool of pending transactions, and executes the transactions of each block in the Ethereum Virtual Machine (\autoref{sec:bg:execution:evm}).
-The two communicate through a local interface, the Engine API: the consensus client asks the execution client to build or to check the \emph{execution payload}, which is the list of transactions carried by a beacon block.
-The idea of a beacon chain that coordinates a set of validators and assigns them to committees comes from earlier sharding designs, in which the beacon chain was meant to coordinate many shard chains (\autoref{sec:bg:sharding}).
-The system model of Part~III follows this design.
+Ethereum launched with proof-of-work and moved to proof-of-stake in September 2022, in the upgrade known as \emph{the Merge}.
+Since then, an Ethereum node runs two programs.
+The \emph{consensus client} runs the \emph{beacon chain}: it manages the validator set, assigns validators to committees, and decides which blocks belong to the chain and which are final~\cite{schwarzschilling2022three}.
+The \emph{execution client} holds the state and the pool of pending transactions, and executes the transactions of each block in the Ethereum Virtual Machine (\autoref{sec:bg:execution:evm}).
+The two talk over a local interface, the Engine API, through which the consensus client asks the execution client to build or check the \emph{execution payload}, the list of transactions carried by a beacon block.
+The beacon chain itself is inherited from earlier sharding designs, where it was meant to coordinate many shard chains (\autoref{sec:bg:sharding}).
+The system model of SOAPS follows that original design.
 
 \subsection{Validators}\label{sec:bg:eth-pos:validators}
 
-To become a validator, a participant deposits at least 32\,ETH in a deposit contract and runs both a consensus and an execution client.
-Each validator has an \emph{effective balance}, derived from its actual balance, which determines both its weight in votes and its probability of being selected as proposer or aggregator.
-Until 2025, the effective balance was capped at 32\,ETH, so that large stakeholders had to run many validators.
-The Pectra upgrade raised this cap to 2048\,ETH, which allows them to merge their stake into fewer validators.
-The stake is, however, unevenly distributed, as staking pools and liquid staking services control a large share of it, even though it is split across many separate validators.
+Becoming a validator requires a deposit of at least 32\,ETH in a deposit contract and running both a consensus and an execution client.
+Each validator has an \emph{effective balance}, derived from its actual balance, which sets its voting weight and its chance of being picked as proposer or aggregator.
+Until the Pectra upgrade in May 2025, the effective balance was capped at 32\,ETH, which forced large stakeholders to run many validators.
+Pectra raised the cap to 2048\,ETH for validators that opt into compounding withdrawal credentials, so stake can now be consolidated into fewer validators.
+Stake remains concentrated all the same: staking pools and liquid staking services control a large share of it, spread over many separate validators.
 
-Validators have three kinds of duties.
-They propose a block when they are selected as the proposer of a slot.
-They \emph{attest} once per epoch, i.e., they sign a vote on the current head of the chain and on the latest checkpoints (\autoref{sec:bg:eth-pos:committees}).
-Some of them are also selected as aggregators, and combine the attestations of their committee into a single signature.
-Finally, since the Altair upgrade, a \emph{sync committee} of 512 validators, renewed every 256 epochs (about 27 hours), signs each block header so that light clients can follow the chain without tracking the whole validator set (\autoref{sec:bg:workload:light}).
+Validators have three regular duties.
+When selected as the proposer of a slot, they propose a block.
+Once per epoch, they \emph{attest}, i.e., they sign a vote on the current head of the chain and on the latest checkpoints (\autoref{sec:bg:eth-pos:committees}).
+Some are also chosen as aggregators and combine the attestations of their committee into one signature.
+Since the Altair upgrade, there is also a \emph{sync committee} of 512 validators, renewed every 256 epochs (about 27 hours), which signs each block header.
+Light clients can then follow the chain without tracking the whole validator set (\autoref{sec:bg:workload:light}).
 
 Validators enter and leave the active set through queues.
-The number of validators that can be activated or that can exit in each epoch is bounded by a \emph{churn limit}, which keeps the validator set from changing too quickly, and in particular prevents an attacker from gaining a large weight in a short time.
-The active set is on the order of a million validators.
-At this scale, a classical BFT protocol in which every validator exchanges votes with every other (\autoref{sec:bg:consensus:bft}) is impractical, and the protocol relies instead on committees and on signature aggregation, which we describe below.
+A \emph{churn limit} bounds how many can be activated or exit per epoch.
+The validator set cannot change too quickly, and in particular an attacker cannot gain a large weight in a short time.
+The active set is on the order of a million validators. \mat{CHECK: current number of active validators at submission (consolidation since Pectra lowers it).}
+At this scale, a classical BFT protocol in which every validator exchanges votes with every other (\autoref{sec:bg:consensus:bft}) is out of the question.
+Ethereum relies instead on committees and signature aggregation, described below.
 
 \subsection{Slots and Epochs}\label{sec:bg:eth-pos:slots}
 
-Time is divided into \emph{slots} of 12 seconds, grouped into \emph{epochs} of 32 slots, or 6.4 minutes (\autoref{fig:bg:eth-slot}).
+Time is divided into \emph{slots} of 12 seconds, and 32 slots make an \emph{epoch} of 6.4 minutes (\autoref{fig:bg:eth-slot}).
 Each slot has a single proposer, which may publish one block.
-Otherwise, the slot remains empty and the protocol proceeds to the next one.
+If it does not, the slot stays empty.
 
-Proposers are selected at random, weighted by effective balance, using a value called the RANDAO mix.
-Each proposer includes in its block a signature over the current epoch number, and this signature is mixed into the RANDAO value.
-The mix obtained at the end of an epoch is used as the seed to select proposers and committees for a later epoch.
-The signature of each proposer is fixed in advance, so a proposer cannot choose its contribution.
-It can, however, withhold its block, in which case its contribution is skipped.
-The last proposers of an epoch can use this to choose between several possible seeds, and thus bias the selection of future proposers in their favor~\cite{nagy2025forking}.
-The selection is also known before the corresponding slots, which allows nodes to prepare, but also reveals to an attacker which node to target at a given time (e.g., with a denial-of-service attack).
+Proposers are drawn at random, weighted by effective balance, from a value called the RANDAO mix.
+Every proposer includes in its block a signature over the current epoch number, and this signature is mixed into the RANDAO value.
+The mix at the end of an epoch seeds the selection of proposers and committees for a later epoch.
+A proposer cannot choose its contribution, since its signature is fixed in advance.
+It can withhold its block, though, and its contribution is then skipped.
+The last proposers of an epoch can exploit this to pick among several possible seeds and bias future proposer selection in their favor~\cite{nagy2025forking}.
+The selection is also public before the slots it concerns.
+Nodes can prepare, but so can an attacker, who knows which node to target at what time (e.g., with a denial-of-service attack).
 
-Within a slot, the protocol follows a fixed schedule.
-At the start of the slot (0\,s), the proposer publishes its block, which is then propagated through the network.
-At 4\,s, the validators of the committee assigned to this slot attest to the head of the chain as they see it, or earlier if they have already received and checked the block.
+Each slot follows a fixed schedule.
+At 0\,s, the proposer publishes its block, which then propagates through the network.
+The validators in the committee of the slot attest to the head of the chain as soon as they have received and validated the block, and at the latest at 4\,s.
 At 8\,s, aggregators publish the aggregated attestations of their committee.
-A validator thus has 4 seconds to receive and check a block before voting.
-If the block arrives late, or cannot be checked in time, the validator votes for the previous head, and the block is likely to be left out of the chain.
-In Part~IV, validators must additionally verify that the data attached to the block is available, and this verification has to fit within the same 4 seconds.
+A validator thus has at most 4 seconds to receive and check a block before voting. \mat{CHECK: slot timing at submission (enshrined PBS and shorter-slot proposals may change the 12\,s / 4\,s schedule).}
+If the block arrives late or cannot be checked in time, the validator votes for the previous head, and the block will likely be left out of the chain.
+In PANDAS (Part~IV), validators must also verify that the data attached to the block is available, and this check has to fit in the same 4 seconds.
 
 \begin{figure}[t]
 	\centering
@@ -250,98 +280,102 @@ In Part~IV, validators must additionally verify that the data attached to the bl
 
 \subsection{Committees and Attestations}\label{sec:bg:eth-pos:committees}
 
-At each epoch, the active validators are shuffled using the RANDAO seed and split into committees.
-Each slot of the epoch receives between 1 and 64 committees, and every validator belongs to exactly one committee in the epoch, so that it attests exactly once per epoch.
-Committees have a target size of 128 validators, a size chosen so that a committee is very unlikely to have a dishonest majority as long as the attacker controls less than a third of the stake.
-With around a million validators, the actual committees are much larger than this minimum.
+At each epoch, the active validators are shuffled with the RANDAO seed and split into committees.
+Each slot gets between 1 and 64 committees, and each validator sits in exactly one committee per epoch, so it attests exactly once per epoch.
+When there are enough validators, the shuffle keeps every committee at or above 128 members, above the minimum of 111 recommended for committee safety.
+With around a million validators, committees are in fact several times larger, with several hundred members each.
 
-The shuffle is deterministic and depends only on public data, i.e., the seed and the list of active validators.
-Any node can therefore recompute the committees and check that a given attestation comes from a member of the right committee, without trusting anyone.
-Both of our designs assign tasks to nodes in the same way, with a deterministic function of public randomness that any node can recompute.
-In Part~III, it is used to elect the validator that computes the placement of state on shards, and the witnesses that check it.
-In Part~IV, it determines which node is responsible for which part of the data.
+The shuffle is deterministic and uses only public data, the seed and the list of active validators.
+Any node can recompute the committees and check that an attestation comes from a member of the right one, without trusting anybody.
+Our two designs reuse this pattern of a deterministic function of public randomness that any node can recompute.
+SOAPS uses it to elect the validator that computes the placement of state on shards, and the witnesses that check it; PANDAS uses it to decide which node is responsible for which part of the data.
 
-An attestation contains three votes.
-The \emph{head vote} designates the block that the validator considers to be the head of the chain, and is used by the LMD-GHOST fork-choice rule.
-The \emph{source} and \emph{target} votes designate two checkpoints, and are used by the Casper FFG finality mechanism~\cite{schwarzschilling2022three}.
-Attestations are signed with BLS signatures~\cite{boneh2001short}, which can be aggregated: the signatures of all the members of a committee who cast the same vote are combined into a single signature, together with a bit field indicating who signed.
-Without aggregation, blocks would have to include about a million signatures per epoch, which would exceed the bandwidth available to nodes.
+An attestation carries three votes.
+The \emph{head vote} names the block that the validator sees as the head of the chain, and feeds the LMD-GHOST fork-choice rule.
+The \emph{source} and \emph{target} votes name two checkpoints, and feed the Casper FFG finality mechanism~\cite{schwarzschilling2022three}.
+Attestations use BLS signatures~\cite{boneh2001short}, which can be aggregated~\cite{boneh2003aggregate}: the signatures of all committee members who cast the same vote collapse into one, with a bit field recording who signed.
+Without aggregation, about a million signatures per epoch would have to go into blocks, more than the bandwidth of nodes can carry.
 
 \subsection{Fork-Choice Rule}\label{sec:bg:eth-pos:forkchoice}
 
-The consensus protocol of Ethereum, called Gasper, combines two mechanisms~\cite{schwarzschilling2022three,neu2021ebb}.
-LMD-GHOST is a fork-choice rule that selects the head of the chain and allows it to grow even when many validators are offline.
-Casper FFG is a finality mechanism that runs on top of this chain and finalizes some of its blocks.
-Gasper follows the ebb-and-flow design of \autoref{sec:bg:consensus}, in which the chain selected by LMD-GHOST remains available and the finalized prefix guarantees safety under network partitions~\cite{neu2021ebb}.
+The consensus protocol of Ethereum, Gasper, combines two mechanisms~\cite{schwarzschilling2022three,neu2021ebb}.
+LMD-GHOST, a fork-choice rule, selects the head of the chain and lets it grow even when many validators are offline.
+Casper FFG, a finality mechanism, runs on top of this chain and finalizes some of its blocks.
+This is the ebb-and-flow structure of \autoref{sec:bg:consensus}: the chain selected by LMD-GHOST stays available, while the finalized prefix stays safe under network partitions~\cite{neu2021ebb}.
 
-LMD-GHOST adapts the GHOST rule (\autoref{sec:bg:consensus:pow}) to votes.
-It starts from the latest justified checkpoint and, at each fork, follows the branch whose subtree has received the most weight, counting only the latest attestation of each validator (hence \emph{latest message driven}).
+LMD-GHOST adapts GHOST (\autoref{sec:bg:consensus:pow}) to votes.
+Starting from the latest justified checkpoint, it follows at each fork the branch whose subtree carries the most weight, counting only the latest attestation of each validator (hence \emph{latest message driven}).
 
-Casper FFG works at the level of epochs.
-The checkpoint of an epoch is the block at its first slot.
-When validators holding at least two thirds of the stake attest with the same source and target, the target checkpoint becomes \emph{justified}.
-A justified checkpoint becomes \emph{finalized} when the checkpoint of the next epoch is justified with it as source.
-In normal conditions, a block is therefore finalized after two to three epochs, or about 13 to 19 minutes.
-Reverting a finalized block would require finalizing two conflicting checkpoints.
-This is only possible if at least a third of the stake signs contradictory votes, and such votes can be proven and slashed (\autoref{sec:bg:eth-pos:safeguards}).
+Casper FFG reasons in epochs, and the checkpoint of an epoch is the block at its first slot.
+Once validators holding at least two thirds of the stake attest with the same source and target, the target checkpoint is \emph{justified}.
+A justified checkpoint is \emph{finalized} when the checkpoint of the next epoch is justified with it as source.
+Under normal conditions, a block is final after two to three epochs, about 13 to 19 minutes.
+Reverting a finalized block would mean finalizing two conflicting checkpoints.
+That takes at least a third of the stake signing contradictory votes, which can be proven and slashed (\autoref{sec:bg:eth-pos:safeguards}).
 
-Several attacks on this fork-choice rule have been identified.
-In a balancing attack, a small number of Byzantine validators release their votes at chosen times so that honest validators remain split between two branches.
-In an ex-ante reorganization, an attacker withholds a block and its votes to later outweigh the next honest block~\cite{schwarzschilling2022three}.
-To mitigate these attacks, the protocol now uses \emph{proposer boost}: a block received on time, before the 4\,s mark, temporarily receives additional weight in the fork choice, equal to a fraction of the weight of a committee.
+The fork-choice rule has been attacked in several ways.
+In a balancing attack, a few Byzantine validators time the release of their votes so that honest validators stay split between two branches~\cite{neu2021ebb}.
+In an ex-ante reorganization, the attacker withholds a block and its votes, and releases them later to outweigh the next honest block~\cite{schwarzschilling2022three}.
+The protocol now counters both with \emph{proposer boost}.
+A block received on time, before the 4\,s mark, gets extra weight in the fork choice until the end of the slot, equal to 40\% of the weight of a committee.
 
-Validators are expected to vote only for blocks that are valid and whose data is \emph{available}, meaning that anyone can download it.
-With Data Availability Sampling, introduced in \autoref{sec:bg:l2}, validators check availability by downloading a few random samples of the data instead of all of it.
-Under the \emph{tight} fork-choice rule, a validator performs this check before attesting, so that a block whose data cannot be retrieved never becomes the head, even if it is otherwise valid.
-Under the \emph{trailing} fork-choice rule, the check is performed later, which gives more time but weaker guarantees, since a block may be built upon before its data has been checked.
-Part~IV targets the tight fork-choice rule, which is why sampling has to be done within the first 4 seconds of the slot~\cite{pigaglio2025pandas}.
+Validators should vote only for blocks that are valid and whose data is \emph{available}, meaning that anyone can download it.
+With Data Availability Sampling (\autoref{sec:bg:l2:limitations}), they check availability by downloading a few random samples of the data rather than all of it.
+The \emph{tight} fork-choice rule has them run this check before attesting, so a block whose data cannot be retrieved never becomes the head, however valid it is otherwise.
+The \emph{trailing} rule runs the check later.
+Validators get more time, but the guarantee is weaker, since others may build on a block before its data has been checked~\cite{damato2024dasforkchoice}.
+PANDAS targets the tight rule, which is why sampling must finish within the first 4 seconds of the slot~\cite{pigaglio2025pandas}.
 
 \subsection{Rewards and Safeguards}\label{sec:bg:eth-pos:safeguards}
 
-Validators are paid for performing their duties correctly and on time, and lose a small amount when they miss them.
-The reward for an attestation depends on whether each of its three votes is correct and on how quickly it was included in a block.
-Proposers are rewarded for including attestations and evidence of misbehavior in their blocks, and members of the sync committee for signing headers.
+Validators are paid for performing their duties correctly and on time, and lose a little when they miss them.
+The reward for an attestation depends on which of its three votes are correct and on how quickly it was included in a block.
+Proposers earn rewards for including attestations and evidence of misbehavior, and sync committee members for signing headers.
 
-A validator is \emph{slashed} when it signs messages that contradict each other.
-There are three such cases: proposing two different blocks for the same slot, casting two attestations with the same target epoch but different content, and casting an attestation whose source and target surround those of another of its attestations~\cite{schwarzschilling2022three}.
-In each case, the proposer that includes the resulting proof (\autoref{sec:bg:consensus:pos}) receives a small reward.
-A slashed validator immediately loses a small part of its balance, is forced to exit, and can only withdraw its remaining funds after about 36 days.
-In the middle of this period, it pays an additional \emph{correlation penalty}, which is proportional to the total stake slashed in the same time window.
-An isolated fault, typically caused by a misconfiguration, therefore incurs a small penalty, whereas a coordinated attack involving a third of the stake leads to the loss of the entire stake of the attackers.
+A validator is \emph{slashed} for signing messages that contradict each other: two different blocks for the same slot, two attestations with the same target epoch but different content, or an attestation whose source and target surround those of another of its own~\cite{schwarzschilling2022three}.
+The proposer that includes the resulting proof (\autoref{sec:bg:consensus:pos}) receives a reward.
+The slashed validator immediately loses 1/4096 of its effective balance, is forced to exit, and can withdraw what remains only after 8192 epochs, about 36 days.
+Halfway through this period, it pays a \emph{correlation penalty}: the fraction of the total stake slashed in the same window, multiplied by three, is taken from its balance, up to the whole of it.
+A one-off fault, usually a misconfiguration, costs little.
+A coordinated attack by a third of the stake costs the attackers all of it.
 
-A different safeguard handles the case where finality stops.
-If more than a third of the stake is offline, no checkpoint can gather two thirds of the votes, and the chain stops finalizing.
-After a few epochs without finality, the \emph{inactivity leak} starts: the balances of the validators that do not participate decrease, faster and faster, until the remaining active validators again hold two thirds of the stake and finality resumes.
-These penalties must, however, be designed carefully: Pavloff et al.\ show that Byzantine validators can exploit them to reduce the stake of honest validators and increase their own relative weight~\cite{pavloff2024byzantine}.
+Another safeguard covers the case where finality stops.
+With more than a third of the stake offline, no checkpoint can gather two thirds of the votes, and the chain stops finalizing.
+After four epochs without finality, the \emph{inactivity leak} kicks in.
+Validators that do not participate lose balance at an increasing rate, until those still active again hold two thirds of the stake and finality resumes.
+The leak has to be designed with care: Pavloff et al.\ show that Byzantine validators can use it to drain the stake of honest validators and raise their own relative weight~\cite{pavloff2024byzantine}.
 
-Ethereum thus does not prevent misbehavior, and instead penalizes it when it can be proven and attributed to a validator.
-SOAPS (Part~III) relies on the same mechanisms (election, stake, and slashing) instead of a separate consensus protocol.
-For this reason, any deviation from the SOAPS protocol must be detectable and attributable to a specific validator, and its challenge mechanism serves this purpose.
+Ethereum, then, does not prevent misbehavior.
+It punishes it whenever it can be proven and attributed to a validator.
+SOAPS relies on these same mechanisms (election, stake, and slashing) instead of adding a consensus protocol of its own.
+Every deviation from SOAPS must therefore be detectable and attributable to a specific validator, which is the purpose of its challenge mechanism.
 
-Finally, the block of each slot is not always built by its proposer.
-The order of transactions in a block can be a source of profit (e.g., by placing one's own transaction just before or after a large trade), and this profit is called \emph{maximal extractable value} (MEV)~\cite{daian2020flashboys}.
-Extracting MEV requires specialized infrastructure, and Ethereum has therefore adopted, outside of the protocol, a form of \emph{proposer-builder separation} (PBS).
-Specialized \emph{builders} assemble blocks and bid for the right to have them proposed, and \emph{relays} forward the highest bid to the proposer, which signs the block header without seeing its content.
-A small number of builders produce most of the blocks~\cite{heimbach2023pbs}.
-As a result, the data distributed and sampled in Part~IV initially comes from a few well-connected and well-provisioned builders, whereas most of the nodes that sample it run on modest hardware.
+Finally, the block of a slot is often not built by its proposer.
+The order of transactions in a block can be profitable, for example when one's own transaction is placed just before or after a large trade.
+This profit is called \emph{maximal extractable value} (MEV)~\cite{daian2020flashboys}.
+Capturing it takes specialized infrastructure, and Ethereum has adopted, outside the protocol, a form of \emph{proposer-builder separation} (PBS).
+\emph{Builders} assemble blocks and bid for them to be proposed; \emph{relays} pass the highest bid to the proposer, which signs the header without seeing the content.
+A handful of builders produce most blocks~\cite{heimbach2023pbs}.
+For PANDAS, this means that the data to distribute and sample starts at a few well-connected, well-provisioned builders, while most of the nodes sampling it run on modest hardware.
 
 \section{Transaction and State Models}\label{sec:bg:state-model}
 
-The state machine view of \autoref{sec:bg:ledgers} leaves open what the state is made of and how a transaction designates the part of the state it reads and modifies.
-The state model defines which data a transaction accesses, and therefore when two transactions conflict.
-It determines whether transactions can be executed in parallel (\autoref{sec:bg:workload:parallel}) and how the state can be divided between shards (\autoref{sec:bg:sharding:state}).
-The \emph{unspent transaction output} (UTXO) model, introduced by Bitcoin~\cite{nakamoto2008bitcoin}, represents the state as a set of coins, while the \emph{account-based} model, used by Ethereum~\cite{wood2014ethereum}, represents it as a set of accounts with balances and storage.
-This thesis works with the account-based model, but we first describe the UTXO model, as the comparison explains several of the difficulties addressed in Parts~II and~III.
+The state machine view of \autoref{sec:bg:ledgers} says nothing about what the state contains, or how a transaction designates the part of it that it reads and modifies.
+That is the role of the state model.
+It defines which data a transaction accesses, and so when two transactions conflict, which in turn governs whether they can run in parallel (\autoref{sec:bg:workload:parallel}) and how the state can be split between shards (\autoref{sec:bg:sharding:state}).
+Bitcoin introduced the \emph{unspent transaction output} (UTXO) model~\cite{nakamoto2008bitcoin}, in which the state is a set of coins.
+Ethereum uses the \emph{account-based} model~\cite{wood2014ethereum}, in which it is a set of accounts with balances and storage.
+We work with accounts throughout, but start with UTXOs, because the contrast explains several difficulties that Parts~II and~III deal with.
 
 \subsection{UTXO Model}\label{sec:bg:state-model:utxo}
 
-In the UTXO model, the state is the set of transaction outputs that have not been spent yet.
-Each output holds an amount and a condition that must be satisfied to spend it, usually a signature from the owner's key.
-A transaction consumes one or more existing outputs, its \emph{inputs}, and creates new ones.
-Each input refers explicitly to the output it spends, by the identifier of the transaction that created it and its position in that transaction, and provides the data that satisfies its spending condition.
-The total amount of the new outputs cannot exceed that of the inputs, and the difference is paid as a fee to the block producer (\autoref{fig:bg:utxo}).
-An output can only be spent once.
-Two transactions that spend the same output are a \emph{double spend}, and at most one of them can be included in the ledger.
+In the UTXO model, the state is the set of transaction outputs not yet spent.
+An output holds an amount and a spending condition, usually a signature from the key of its owner.
+A transaction consumes existing outputs, its \emph{inputs}, and creates new ones.
+Each input names the output it spends, by the identifier of the transaction that created it and its index there, and supplies the data that satisfies the spending condition.
+Outputs cannot exceed inputs in total, and the difference goes to the block producer as a fee (\autoref{fig:bg:utxo}).
+An output can be spent only once.
+Two transactions spending the same output form a \emph{double spend}, and at most one of them makes it into the ledger.
 
 \begin{figure}[t]
 	\centering
@@ -352,65 +386,68 @@ Two transactions that spend the same output are a \emph{double spend}, and at mo
 	\label{fig:bg:utxo}
 \end{figure}
 
-Since inputs are listed in the transaction, the part of the state a transaction depends on is known before it is executed.
-Two transactions conflict only if they spend the same output, or if one spends an output created by the other.
-Transactions that do not share outputs can be validated in parallel, and a sharded design can place each output on a shard (e.g., according to the identifier of the transaction that created it) and know in advance which shards a transaction involves.
-For the same reason, several of the first sharded blockchains were designed for the UTXO model~\cite{omniLedger,rapidchain}, and transaction placement methods have been proposed for it~\cite{Nguyen2019}.
+Because inputs are listed in the transaction, the state a transaction depends on is known before it runs.
+Two transactions conflict only if they spend the same output, or if one spends an output that the other creates.
+Transactions with no outputs in common can be validated in parallel.
+A sharded design can place each output on a shard, say by the identifier of the transaction that created it, and know in advance which shards a transaction touches.
+Several of the first sharded blockchains were built on UTXOs for this reason~\cite{omniLedger,rapidchain}, and transaction placement methods have been proposed for the model~\cite{Nguyen2019}.
 
-The limitation of this model is that outputs are consumed as a whole and do not hold any persistent data.
-Applications that maintain shared, long-lived state, such as a token or an exchange used by many users, are therefore difficult to express.
-Extended UTXO models add data and more expressive scripts to outputs while keeping explicit inputs, but they require the application to split its state into outputs that are consumed and recreated at every update.
-Since the workloads we study and the systems we target use accounts, we do not consider the UTXO model further.
+The catch is that outputs are consumed whole and hold no persistent data.
+Applications with shared, long-lived state, such as a token or an exchange used by many users, are hard to express.
+Extended UTXO models attach data and more expressive scripts to outputs while keeping explicit inputs, but the application still has to split its state into outputs that are consumed and recreated on every update~\cite{chakravarty2020eutxo}.
+The workloads we study and the systems we target use accounts, so we leave UTXOs aside from here on.
 
 \subsection{Account-Based Model}\label{sec:bg:state-model:account}
 
-In the account-based model, the state is a mapping from addresses to accounts.
-In Ethereum, there are two types of accounts.
-\emph{Externally owned accounts} (EOA) are controlled by a private key, and hold a balance and a \emph{nonce}, which counts the transactions sent by the account.
-Each transaction carries the nonce of its sender, which forces the transactions of an account to be executed in order and prevents the same signed transaction from being replayed.
+In the account-based model, the state maps addresses to accounts.
+Ethereum has two kinds of accounts.
+\emph{Externally owned accounts} (EOA) are controlled by a private key and hold a balance and a \emph{nonce}, the number of transactions the account has sent.
+Every transaction carries the nonce of its sender.
+This forces the transactions of an account to execute in order, and keeps a signed transaction from being replayed.
 \emph{Smart contract accounts} (SCA) are created by deploying code.
-In addition to a balance and a nonce, they hold this code and a persistent \emph{storage}, a mapping from 256-bit keys, called slots, to 256-bit values, which only the contract's code can modify (\autoref{sec:bg:execution}).
-A token contract, for instance, typically keeps the balance of each of its holders in a separate storage slot.
+Besides a balance and a nonce, they hold that code and a persistent \emph{storage}: a mapping from 256-bit keys, called slots, to 256-bit values, which only the code of the contract can modify (\autoref{sec:bg:execution}).
+A token contract typically keeps the balance of each holder in its own storage slot.
 
-A transaction is sent by an EOA.
-It either transfers currency to another account, deploys a new contract, or calls an existing contract with some input data.
-The called contract may in turn call other contracts, which may call others, so that a single transaction can read and modify many accounts and storage slots.
-The block only contains the original transaction, and the resulting \emph{internal transactions} can only be observed by executing it (\autoref{sec:bg:execution:evm})~\cite{pigaglio2023exploring}.
-Interactions are also very unevenly distributed, as a small number of accounts, such as exchanges, popular token contracts, and decentralized finance protocols, are involved in a large share of all transactions~\cite{guo2019graph}.
+Transactions are sent by EOAs.
+A transaction transfers currency to another account, deploys a new contract, or calls an existing one with some input data.
+The called contract may call others, which may call others again, so one transaction can read and modify many accounts and storage slots.
+Only the original transaction appears in the block.
+The \emph{internal transactions} it triggers can only be observed by executing it (\autoref{sec:bg:execution:evm})~\cite{pigaglio2023exploring}.
+Activity is also very uneven: a small number of accounts, such as exchanges, popular token contracts and decentralized finance protocols, take part in a large share of all transactions~\cite{guo2019graph}.
 
-The main difference with the UTXO model is that the state accessed by a transaction is not known in advance.
-It depends on the code of the contracts involved and on the current values in their storage, which may change between the moment the transaction is signed and the moment it is executed.
-The same call can thus access different slots, or different contracts, depending on the transactions executed before it.
-As a consequence, whether two transactions conflict, meaning that one writes data that the other reads or writes, is in general only known after they have been executed.
-Ethereum lets a transaction declare an \emph{access list} of the accounts and slots it intends to use, but the list is optional, and the transaction can still access state that it does not list.
-Parallel execution (\autoref{sec:bg:workload:parallel}) and state sharding (\autoref{sec:bg:sharding:state}) are therefore harder with accounts than with UTXOs.
-Part~II measures how the accesses of real transactions are distributed over time and across transactions, and the same uncertainty complicates the placement of accounts on shards in Part~III.
+The key difference from UTXOs is that the state a transaction will access is not known in advance.
+It depends on the code of the contracts involved and on the current contents of their storage, which may change between the moment the transaction is signed and the moment it runs.
+The same call can touch different slots, or even different contracts, depending on what executed before it.
+Whether two transactions conflict, i.e., whether one writes data that the other reads or writes, is generally known only after both have run.
+Ethereum does let a transaction declare an \emph{access list} of the accounts and slots it plans to use~\cite{eip2930}.
+The list is optional, though, and the transaction may still touch state it did not list.
+This makes parallel execution (\autoref{sec:bg:workload:parallel}) and state sharding (\autoref{sec:bg:sharding:state}) harder with accounts than with UTXOs.
+Part~II measures how real transactions spread their accesses over time and across one another, and the same uncertainty complicates the placement of accounts in SOAPS (Part~III).
 
-Executing a transaction also has a cost, measured in \emph{gas}.
-Each operation of the execution environment has a fixed gas cost, which reflects the resources it uses, and accessing or writing storage is among the most expensive operations.
-The sender sets a maximum amount of gas for its transaction, and pays for the gas actually used.
-Since the London upgrade, the price of gas has two components~\cite{roughgarden2021tfm}.
-A \emph{base fee}, set by the protocol, increases when blocks are fuller than a target and decreases when they are emptier, and is burned.
-A \emph{priority fee}, chosen by the sender, goes to the block proposer and determines which transactions it includes first when demand is high, and therefore how long a transaction waits before being included~\cite{pacheco2023my}.
-Each block also has a \emph{gas limit}, which bounds the total amount of computation it may contain.
-In effect, the gas limit sets the throughput of the chain.
-It is kept low enough for nodes with modest hardware to execute each block within a slot, as a consequence of the full replication discussed in \autoref{sec:bg:ledgers}.
+Executing a transaction costs \emph{gas}.
+Each operation of the execution environment has a fixed gas cost reflecting the resources it uses, and storage reads and writes are among the most expensive.
+The sender sets a maximum amount of gas and pays for the gas actually used.
+Since the London upgrade, the gas price has two parts~\cite{eip1559,roughgarden2021tfm}.
+A \emph{base fee}, set by the protocol, rises when blocks are fuller than a target, falls when they are emptier, and is burned.
+A \emph{priority fee}, chosen by the sender, goes to the proposer.
+When demand is high, it decides which transactions get in first, and so how long a transaction waits to be included~\cite{pacheco2023my}.
+Each block also has a \emph{gas limit} that bounds its total computation, and this limit is, in effect, the throughput of the chain.
+It is kept low enough for nodes on modest hardware to execute a block within a slot, a direct consequence of full replication (\autoref{sec:bg:ledgers}).
 
 \section{Smart Contracts and Execution Environments}\label{sec:bg:execution}
 
-A \emph{smart contract} is a program stored in the ledger, whose code is executed by every full node whenever a transaction calls it.
-Its state, such as balances or open positions, is part of the replicated state, and can only be modified by the contract's own code.
-Since all nodes execute the same code on the same state, a contract call produces the same result on every node, and no party needs to be trusted to execute it correctly.
+A \emph{smart contract} is a program stored in the ledger and executed by every full node whenever a transaction calls it.
+Its state, such as balances or open positions, is part of the replicated state, and only the code of the contract can modify it.
+All nodes run the same code on the same state and get the same result, so nobody has to be trusted to execute the contract correctly.
 
-A large part of the activity on Ethereum involves a few types of contracts.
-Token contracts keep track of who owns which units of a fungible asset, following the ERC-20 interface, or of non-fungible items, following ERC-721.
-Decentralized exchanges let users swap one token for another against pools of liquidity held by a contract.
-Lending protocols let users borrow tokens against collateral, and bridges lock assets on one chain to release equivalent assets on another.
-In the workload we analyze in Part~II, transactions involving smart contracts have become dominant over time, whereas simple transfers, which represented more than 80\% of early transactions, have become marginal~\cite{pigaglio2023exploring}.
+Much of the activity on Ethereum goes through a few kinds of contracts.
+Token contracts record who owns which units of a fungible asset (the ERC-20 interface) or which non-fungible items (ERC-721).
+Around them sit decentralized exchanges, which let users swap one token for another against liquidity pools held by a contract, lending protocols, which lend tokens against collateral, and bridges, which lock assets on one chain to release equivalent assets on another.
+In the workload analyzed in Part~II, transactions involving contracts took over as time went on, and simple transfers, which made up more than 80\% of early transactions, fell to around 20\% by the Merge~\cite{pigaglio2023exploring}.
 
-Contracts can call each other, and applications are often built by composing existing contracts.
-A swap on a decentralized exchange, for instance, may go through a router contract, then through one or several pools, each of which calls the token contracts of the assets it holds, so that a single transaction can involve tens of contracts.
-\autoref{fig:bg:calltree} shows a simplified example, in which a two-step swap already involves six contracts.
+Contracts call each other, and applications are often assembled from existing contracts.
+A swap on a decentralized exchange may go through a router contract, then through one or more pools, each calling the token contracts of the assets it holds, so a single transaction can end up involving tens of contracts.
+Even the simplified two-step swap of \autoref{fig:bg:calltree} involves six.
 
 \begin{figure}[t]
 	\centering
@@ -421,54 +458,58 @@ A swap on a decentralized exchange, for instance, may go through a router contra
 	\label{fig:bg:calltree}
 \end{figure}
 
-These calls create the dependencies between accounts in the account-based model (\autoref{sec:bg:state-model:account}).
-They also explain why some contracts, such as widely used tokens or exchange pools, are accessed by a large fraction of all transactions, and become contention points when transactions are executed in parallel or when the state is split between shards.
+These calls are what create dependencies between accounts in the account-based model (\autoref{sec:bg:state-model:account}).
+They also explain why some contracts, widely used tokens and exchange pools in particular, are accessed by a large fraction of all transactions.
+Such contracts turn into contention points as soon as transactions run in parallel or the state is split between shards.
 
 \subsection{The Ethereum Virtual Machine}\label{sec:bg:execution:evm}
 
-Ethereum contracts are executed by the Ethereum Virtual Machine (EVM)~\cite{wood2014ethereum}.
-The EVM is a stack machine that operates on 256-bit words.
-During a call, a contract has access to a stack, a temporary \emph{memory} that is discarded at the end of the call, the input data of the call, and its persistent \emph{storage} (\autoref{sec:bg:state-model:account}).
-Each instruction has a gas cost, and execution stops with an error when the gas provided by the transaction runs out, so that every execution is guaranteed to terminate.
+Ethereum contracts run on the Ethereum Virtual Machine (EVM)~\cite{wood2014ethereum}, a stack machine that operates on 256-bit words.
+During a call, a contract sees a stack, a temporary \emph{memory} discarded when the call ends, the input data of the call, and its persistent \emph{storage} (\autoref{sec:bg:state-model:account}).
+Every instruction costs gas, and execution aborts with an error when the gas of the transaction runs out, so every execution terminates.
 Storage accesses are by far the most expensive instructions.
-Reading a storage slot for the first time in a transaction costs hundreds of times more gas than an arithmetic operation, and writing a slot that was previously zero costs even more, because these operations require accessing and updating the state database of every node.
+Reading a slot for the first time in a transaction costs hundreds of times more than an arithmetic operation, and writing a slot that was previously zero costs more still, because each such operation reads or updates the state database of every node.
 
-A contract calls another contract with the \texttt{CALL} instruction, which runs the code of the callee on the callee's storage.
-\texttt{STATICCALL} does the same but forbids any modification of the state, and \texttt{DELEGATECALL} runs the code of the callee on the storage of the caller, which is how libraries and upgradable contracts are implemented.
-If a call fails, its changes to the state are reverted, but the caller can continue and decide how to handle the failure.
-Transactions in a block are executed one after the other, in the order chosen by the block producer, and each transaction sees the state left by the previous one.
+A contract calls another with \texttt{CALL}, which runs the code of the callee on the storage of the callee.
+\texttt{STATICCALL} does the same but forbids any change to the state.
+\texttt{DELEGATECALL} runs the code of the callee on the storage of the caller, which is how libraries and upgradable contracts work.
+When a call fails, its changes to the state are reverted, and the caller is free to continue and handle the failure.
+Transactions in a block run one after the other, in the order chosen by the block producer, each seeing the state left by the previous one.
 
 The state is stored in Merkle Patricia Tries, which combine the Merkle trees of \autoref{sec:bg:ledgers} with a prefix tree (Patricia trie), so that each key determines a unique path from the root to its value.
-The state is organized in two levels.
-The \emph{world-state trie} maps the hash of each address to the corresponding account, which contains its nonce, balance, code hash, and storage root.
-Each contract has its own \emph{storage trie}, which maps the hash of each storage slot to its value.
-The root of the world-state trie is the state root included in each block header.
-Reading a value requires following a path from the root of the trie down to a leaf, which can take several disk accesses.
-Since keys are hashed, entries that are related in the application, such as two slots of the same contract, end up in unrelated parts of the trie and on disk.
-Accessing the state is therefore one of the main costs of executing a block, and clients rely on caches and on flat copies of the latest state to reduce it.
-Such caches are only effective if transactions tend to access state that was accessed recently, which is the temporal locality we measure in Part~II.
+There are two levels.
+The \emph{world-state trie} maps the hash of each address to its account: nonce, balance, code hash, and storage root.
+Each contract has its own \emph{storage trie}, which maps the hash of each slot to its value.
+The root of the world-state trie is the state root found in each block header.
+Reading a value means walking from the root down to a leaf, which may take several disk accesses.
+Because keys are hashed, entries that belong together in the application, two slots of the same contract for instance, land in unrelated parts of the trie and of the disk.
+State access is one of the main costs of executing a block, and clients cut it down with caches and flat copies of the latest state.
+Those caches only pay off if transactions tend to access state that was accessed recently, a property called temporal locality (\autoref{sec:bg:workload}).
 
-The read and write sets of a transaction cannot be obtained from the block alone, since internal transactions are not recorded in it (\autoref{sec:bg:state-model:account}).
-To obtain them, we replay the whole chain with the Go Ethereum (geth) client and record, for each transaction, the accounts it reads and writes, including those accessed by its internal transactions (\autoref{fig:bg:calltree}).
-Replaying the chain up to the Merge takes about three days and produces a dataset of about 2\,TB, and Part~II describes the tool we built to process it~\cite{pigaglio2023exploring}.
+The block alone does not reveal the read and write sets of a transaction, since internal transactions are not recorded in it (\autoref{sec:bg:state-model:account}).
+To get them, we replay the whole chain with the Go Ethereum (geth) client and record, for every transaction, the accounts it reads and writes, including those touched by its internal transactions (\autoref{fig:bg:calltree}).
+Replaying the chain up to the Merge takes about three days and yields a dataset of about 2\,TB; Part~II describes the tool we built to process it~\cite{pigaglio2023exploring}.
 
-Sequential execution over a single global state, combined with the block gas limit that keeps execution within reach of modest nodes (\autoref{sec:bg:state-model:account}), caps Ethereum's throughput to roughly 15 to 30\,tx/s.
+Sequential execution over a single global state, together with a gas limit that keeps execution within reach of modest nodes (\autoref{sec:bg:state-model:account}), puts a hard cap on the throughput of Ethereum.
+In October 2026, the gas limit is 60 million gas per block~\cite{etherscangaslimit}. \mat{CHECK: gas limit and average tx/s at submission; update the derived 2{,}850 tx/block and 240\,tx/s.}
+The cheapest transaction, a plain transfer, costs 21{,}000 gas~\cite{wood2014ethereum}, so a 12-second slot holds at most about 2{,}850 transactions, or under 240\,tx/s.
+Real transactions use far more gas, and the chain processes around 20\,tx/s on average~\cite{etherscantx}.
 
 \subsection{Alternative Execution Environments}\label{sec:bg:execution:alternatives}
 
-Many other blockchains, as well as most layer-2 protocols (\autoref{sec:bg:l2}), reuse the EVM.
-Being EVM-compatible allows them to run existing contracts and to reuse the same development tools, and their workloads tend to resemble that of Ethereum, since they host the same kinds of applications.
-Other chains use different virtual machines (e.g., based on WebAssembly) but keep the same model of contracts executed sequentially over shared state.
+Many other blockchains reuse the EVM, as do most layer-2 protocols (\autoref{sec:bg:l2}).
+EVM compatibility lets them run existing contracts and reuse the same development tools, and their workloads tend to look like that of Ethereum, because they host the same kinds of applications.
+Chains with other virtual machines, for example based on WebAssembly, usually keep the same model of contracts executed sequentially over shared state.
 
-A different line of work changes the execution model to allow parallel execution.
-Dickerson et al.\ proposed that block producers execute contract calls speculatively in parallel, and publish the resulting schedule so that validators can replay the block in parallel and deterministically~\cite{dickerson2017concurrency}.
-Several recent blockchains were designed with parallel execution in mind.
-In Solana, each transaction declares the accounts it will read and write, and the runtime executes in parallel the transactions whose accounts do not overlap.
-Sui represents the state as objects, and distinguishes objects owned by a single user from shared objects.
-Transactions that only use owned objects do not need to be ordered with respect to others and can bypass consensus, and only transactions on shared objects go through consensus~\cite{blackshear2024sui}.
-Aptos uses Block-STM, which executes the transactions of a block optimistically in parallel, detects conflicts at runtime, and re-executes the transactions involved, so that the result is the same as a sequential execution in the order of the block~\cite{gelashvili2023blockstm}.
+Another line of work changes the execution model itself to allow parallel execution.
+Dickerson et al.\ proposed that block producers execute contract calls speculatively in parallel and publish the resulting schedule, so that validators can replay the block in parallel and deterministically~\cite{dickerson2017concurrency}.
+Several recent blockchains were designed for parallel execution from the start.
+Solana has each transaction declare the accounts it will read and write, and runs in parallel the transactions whose accounts do not overlap~\cite{yakovenko2019sealevel}.
+Sui models the state as objects, and separates objects owned by a single user from shared ones.
+Transactions that use only owned objects need no ordering relative to others and skip consensus; only those on shared objects go through it~\cite{blackshear2024sui}.
+Aptos uses Block-STM, which runs the transactions of a block optimistically in parallel, detects conflicts at runtime, and re-executes the transactions involved, giving the same result as a sequential execution in block order~\cite{gelashvili2023blockstm}.
 
-These designs follow two approaches.
-Either transactions declare their dependencies in advance, which is easy in the UTXO model but constrains how contracts are written in the account-based model, or the system executes optimistically and assumes that conflicts are rare.
-In both cases, the benefit depends on the workload: transactions that access the same accounts must still be executed sequentially.
-\autoref{sec:bg:workload} discusses these techniques further, and Part~II measures to what extent real transactions allow them.
+These designs take one of two approaches.
+Either transactions declare their dependencies up front, which comes naturally with UTXOs but constrains how contracts are written with accounts, or the system executes optimistically and bets on conflicts being rare.
+Either way, the gain depends on the workload, since transactions that access the same accounts still have to run one after the other.
+\autoref{sec:bg:workload} returns to these techniques.

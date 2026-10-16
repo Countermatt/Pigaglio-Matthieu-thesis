@@ -2,49 +2,145 @@
 \chapter{Synthesis and Motivation}\label{ch:bg:synthesis}
 %==============================================================================
 
-\begin{itemize}
-	\item A short chapter, a few pages, to close Part I: go from the limitations of \autoref{ch:bg:scalability} to the research questions.
-\end{itemize}
+% \begin{itemize}
+% 	\item A short chapter, a few pages, to close Part I: go from the limitations of \autoref{ch:bg:scalability} to the research questions.
+% \end{itemize}
+
+\autoref{ch:bg:scalability} reviewed the main ways to scale blockchains and ended each review on what is still missing.
+This short chapter closes Part~I by gathering those gaps and turning them into the research questions of this thesis. \mat{CHECK: RQ1--RQ3 are stated in \autoref{sec:bg:challenges}; keep their wording identical to the Introduction once it is written.}
+
+\autoref{sec:bg:challenges} groups the limitations into three open challenges, one for each of the following parts.
+The first is to check, on real data, the workload assumptions that many designs rely on.
+The second is to place state across shards in a way that cuts cross-shard transactions while staying small, verifiable and resistant to manipulation.
+The third is to verify the availability of layer-2 data by sampling, within the timing of Ethereum's consensus.
+\autoref{sec:bg:requirements} sets out what the solutions to the last two must share, whether they shard computation on layer~1 or data for layer~2.
+They must be verifiable by any node without a trusted party, yet flexible enough for large and changing systems, and they must stay decentralized and practical to deploy.
+Finally, \autoref{sec:bg:positioning} places the contributions relative to each other and gives the roadmap for Parts~II to~IV.
+SOAPS and PANDAS address different bottlenecks and complement each other.
 
 \section{Open Challenges}\label{sec:bg:challenges}
 
-\begin{itemize}
-	\item C1: the designs above assume the workload has good locality, but this is rarely checked on real, recent data. This is Part II~\cite{pigaglio2023exploring}.
-	\begin{itemize}
-		\item Sharding, parallel execution and stateless clients are mostly evaluated on synthetic or short traces.
-		\item The question: can solid assumptions about the near future be drawn from historical data?
-	\end{itemize}
-	\item C2: state placement has to cut cross-shard transactions while keeping its metadata small, staying verifiable, and not letting anyone tilt it in their favour. This is Part III.
-	\begin{itemize}
-		\item It should fit into the existing consensus and its safeguards, without a trusted coordinator.
-	\end{itemize}
-	\item C3: L2 data availability has to be checked by sampling, within consensus timing, over an open P2P network. This is Part IV.
-	\begin{itemize}
-		\item The constraints: a hard 4\,s deadline, tens of thousands of nodes, some of them faulty or unresponsive, and no new consensus step.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item C1: designs assume locality, rarely checked on real, recent data (Part II). Question: solid assumptions about the near future from historical data?
+% 	\item C2: state placement that cuts cross-shard transactions with small metadata, verifiable, not biasable; fits existing consensus, no trusted coordinator (Part III).
+% 	\item C3: L2 data availability checked by sampling within consensus timing over an open P2P network; 4\,s, tens of thousands of nodes, faults, no new consensus step (Part IV).
+% \end{itemize}
+
+The limitations identified in \autoref{ch:bg:scalability} reduce to three open challenges.
+Each motivates one research question, and one part of this thesis.
+
+\paragraph{C1: Knowing the workload.}
+Many of the techniques reviewed in \autoref{sec:bg:workload} and \autoref{sec:bg:sharding} rely, explicitly or not, on properties of the transaction workload.
+Parallel execution and sharding assume that concurrent transactions mostly access disjoint state.
+Light nodes, stateless clients and snapshot-based bootstrap assume that recently used state is reused.
+Placement optimizations go further and assume that past interactions between accounts predict future ones.
+These assumptions are rarely measured on a real, large and recent workload, \mat{CHECK: Part~II currently uses pre-Merge data; either update it with recent data (plan TODO) or drop ``recent'' here.} and designs are often evaluated on synthetic workloads or limited traces. \mat{CHECK: soften or support ``rarely measured'' and ``often evaluated on synthetic workloads or limited traces'' with a few examples from the related work.}
+Whether they hold, for which accounts, and whether they remain stable over time, determines how much these designs can actually gain.
+This leads to our first research question.
+
+\begin{quote}
+	\textbf{RQ1.} Can we derive solid assumptions on the near-future workload of a blockchain from its historical transaction data?
+\end{quote}
+
+\paragraph{C2: Placing state safely.}
+State sharding splits execution and state across shards, but hash-based placement makes nearly every Ethereum transaction cross-shard (\autoref{sec:bg:sharding:state}).
+Placement optimizations reduce this share, but assign every account explicitly, which is too much metadata for every node to keep at Ethereum's scale.
+Most of them also leave open who computes the placement and how others can check it (\autoref{sec:bg:sharding:limitations}).
+In an open blockchain, a placement that a single party decides without verification invites selfish optimization, and can even help an attacker gather target accounts in a shard it controls.
+The designs that do make placement verifiable have every node or a whole committee redo the optimization.
+What is needed is a placement that reduces cross-shard transactions with bounded metadata, that any node can verify, and that fits into the existing consensus and its incentives without a trusted coordinator.
+
+\begin{quote}
+	\textbf{RQ2.} How can state be placed in an account-based sharded blockchain to reduce cross-shard transactions, without centralizing placement decisions or exposing them to selfish optimization?
+\end{quote}
+
+\paragraph{C3: Checking data availability in time.}
+Rollups move the pressure onto layer~1, which must make their data available (\autoref{sec:bg:l2}).
+Broadcasting all of it to every node does not scale beyond a few blobs per block, and data availability sampling lets each node check availability while downloading only a small part.
+In Ethereum, however, sampling must complete within the first 4 seconds of a slot, so that attesters can vote on the block and on the availability of its data at the same time.
+It must work over an open peer-to-peer network of thousands to tens of thousands of nodes, some of them faulty, unresponsive or with an incomplete view of the network, and without adding a step to consensus.
+Existing proposals either do not scale to the target data volume, weaken the guarantees of sampling, or leave the sampling process unspecified (\autoref{sec:bg:l2:limitations}).
+
+\begin{quote}
+	\textbf{RQ3.} How can layer-2 data be disseminated and sampled within Ethereum's consensus time bounds, in a fully decentralized, peer-to-peer way?
+\end{quote}
 
 \section{Common Requirements for L1 and L2 Sharding}\label{sec:bg:requirements}
 
-\begin{itemize}
-	\item Verifiable: any node must be able to recompute who is assigned what (accounts to shards, cells to nodes), with no trusted third party.
-	\begin{itemize}
-		\item This uses the same trick as Ethereum committees: deterministic functions of public randomness and public state (\autoref{sec:bg:eth-pos:committees}).
-	\end{itemize}
-	\item Flexible: able to adapt in large, changing systems (the workload evolves, nodes join and leave, some fail).
-	\begin{itemize}
-		\item Fully deterministic schemes are too rigid, and fully ad-hoc ones cannot be checked. My designs try to sit in between.
-	\end{itemize}
-	\item Decentralized: no heavy new consensus step, low cost per node, anyone can participate.
-	\item Practical: evaluated on real Ethereum workloads and timing, and compatible with the existing protocols.
-\end{itemize}
+% \begin{itemize}
+% 	\item Verifiable: any node can recompute who is assigned what; same trick as Ethereum committees.
+% 	\item Flexible: adapt in large, changing systems; between fully deterministic and fully ad hoc.
+% 	\item Decentralized: no heavy new consensus step, low cost per node, open participation.
+% 	\item Practical: real Ethereum workloads and timing, compatible with existing protocols.
+% \end{itemize}
+
+Challenges C2 and C3 concern different resources: execution and state on layer~1, and the data that layer-2 protocols publish on it.
+Both are forms of sharding, however, since both make each node responsible for only part of the system.
+They share a central difficulty: deciding \emph{who is responsible for what}, accounts for shards or data for nodes, in an open system where some participants are adversarial.
+We derive four requirements that our solutions to both challenges must meet.
+
+\paragraph{Verifiable.}
+Any node must be able to recompute or check, on its own, who is assigned what, without trusting a third party.
+Ethereum already solves this problem for its committees.
+The assignment of validators is a deterministic function of public randomness and public state, so any node can recompute it and reject a vote from the wrong committee (\autoref{sec:bg:eth-pos:committees}).
+Our designs reuse this principle.
+SOAPS elects, from the beacon chain's randomness, the node that computes the placement and those that check it.
+PANDAS derives from the epoch seed the part of the data that each node keeps.
+
+\paragraph{Flexible.}
+Determinism alone is not enough.
+A fully static assignment, such as hash-based placement, cannot follow the workload, and a fixed communication plan cannot cope with nodes that fail or that see the network differently.
+A fully ad hoc approach, on the other hand, cannot be checked.
+Our designs sit in between.
+They fix the part of the decision that must be verifiable, and leave a bounded part free to adapt.
+In SOAPS, a limited set of explicit placement rules is recomputed periodically from the workload.
+In PANDAS, nodes adapt how they fetch data to the conditions they observe.
+
+\paragraph{Decentralized.}
+The solutions must not concentrate power or cost.
+They must add no heavy consensus step, such as running a BFT agreement on every placement update, and keep the cost of an ordinary node within the hardware and bandwidth recommended for Ethereum~\cite{eip7870}.
+Anyone must remain able to participate.
+
+\paragraph{Practical.}
+The solutions must be grounded in how Ethereum actually works.
+They should be evaluated on real Ethereum workloads and under its consensus timing, and remain compatible with the existing protocols, rather than assume a blockchain designed from scratch.
 
 \section{Positioning of the Contributions}\label{sec:bg:positioning}
 
-\begin{itemize}
-	\item SOAPS shards computation on L1. It removes contention on execution and state, and it benefits from knowing the workload (Part II).
-	\item PANDAS~\cite{pigaglio2025pandas} shards the L2 data. It removes the bandwidth bottleneck for data availability, and it barely depends on the workload.
-	\item The two complement each other rather than compete: a sharded L1 still has to host L2 data, and an L1 full of rollups still gains from parallel execution.
-	\item A figure would help: L1 vs.\ L2 on one axis, computation vs.\ data on the other, with Parts II to IV placed on it.
-	\item End with a short roadmap of Parts II to IV.
-\end{itemize}
+% \begin{itemize}
+% 	\item SOAPS shards computation on L1; benefits from knowing the workload (Part II).
+% 	\item PANDAS shards L2 data; removes the bandwidth bottleneck; barely depends on the workload.
+% 	\item Complementary; figure L1/L2 x computation/data; roadmap of Parts II to IV.
+% \end{itemize}
+
+\begin{figure}[t]
+	\centering
+	\resizebox{\linewidth}{!}{\input{figures/contributions_map.tex}}
+	\caption{Positioning of the contributions.
+		SOAPS (Part~III) shards computation on layer~1 and builds on the workload analysis of Part~II.
+		PANDAS (Part~IV) shards the data that layer-2 protocols publish on layer~1.
+		Parallel execution in rollup sequencers is left as a perspective.}
+	\label{fig:bg:positioning}
+\end{figure}
+
+\autoref{fig:bg:positioning} places the contributions of this thesis along two axes: the layer concerned, and whether what is sharded is computation or data.
+
+SOAPS (Part~III) shards computation on layer~1.
+It makes state sharding practical by placing explicitly only a bounded set of the accounts that cause the most cross-shard transactions, and by integrating the computation and verification of this placement into consensus.
+Its benefit depends on the workload, and it builds directly on Part~II, which identifies the small set of accounts responsible for most of the loss of spatial locality.
+
+PANDAS (Part~IV) shards data.
+It removes the bandwidth bottleneck of data availability, so that layer~1 can host far more layer-2 data, while each node handles only a small share of it.
+It depends very little on the workload, since erasure-coded cells carry no semantic locality.
+Its difficulty lies instead in the network: latency, failures, and nodes with inconsistent views, under a hard deadline.
+
+The two contributions complement each other rather than compete.
+A sharded layer~1 still has to host the data of the rollups built on it, and the data of each shard could itself be sampled.
+Conversely, scaling data availability does not make execution on layer~1 cheaper.
+The workload analysis of Part~II informs the first, and, beyond this thesis, could inform parallel execution in rollup sequencers.
+
+The rest of this thesis follows this structure.
+Part~II analyzes the locality of Ethereum transactions and answers RQ1~\cite{pigaglio2023exploring}.
+Part~III presents SOAPS and answers RQ2. \mat{TODO: cite the SOAPS paper here (and in the Part~III row of \autoref{tab:bg:placement}) once it has a bib entry.}
+Part~IV presents PANDAS and answers RQ3~\cite{pigaglio2025pandas}.
+The conclusion compares the two designs, summarizes the answers to the research questions, and discusses perspectives.

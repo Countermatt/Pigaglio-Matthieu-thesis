@@ -2,293 +2,686 @@
 \chapter{The Scalability Problem}\label{ch:bg:scalability}
 %==============================================================================
 
-\begin{itemize}
-	\item Here I explain why blockchains do not scale, present the two families of solutions (sharding on L1, and L2s), and for each one say clearly what is still missing.
-	\item Much of this can come from the related work sections of the locality, SOAPS and PANDAS papers, extended.
-	\item Order: bottlenecks, optimizations that rely on the workload, sharding, L2 and data availability, and the limitations of each.
-	\item At the end, a table comparing existing approaches on a few criteria: what gets sharded, whether it uses the workload, whether assignments can be verified, whether it is part of consensus, and whether it was evaluated on a real workload.
-\end{itemize}
+% \begin{itemize}
+% 	\item Here I explain why blockchains do not scale, present the two families of solutions (sharding on L1, and L2s), and for each one say clearly what is still missing.
+% 	\item Much of this can come from the related work sections of the locality, SOAPS and PANDAS papers, extended.
+% 	\item Order: bottlenecks, optimizations that rely on the workload, sharding, L2 and data availability, and the limitations of each.
+% 	\item A comparison table of existing state-placement approaches, using the SOAPS criteria: load balancing, cross-shard reduction, auditable, incentivized, adaptive, and bounded state (see \autoref{sec:bg:sharding:limitations}).
+% \end{itemize}
+
+\autoref{ch:bg:fundamentals} ended on a limit built into the classical design: every full node stores the whole state and executes every transaction, so adding nodes adds no capacity.
+This chapter looks at what that limit costs and at the main ways around it.
+For each approach, it identifies what is still missing.
+These gaps are where the contributions of this thesis come in.
+
+\autoref{sec:bg:bottlenecks} measures the problem in throughput, latency, and the cost of running a full node.
+Raising throughput by making blocks bigger or more frequent drives that cost up, and with it the risk of fewer, larger participants.
+The general answer is to make sure no single node handles every transaction or every piece of data.
+On the layer-1 chain this means sharding computation, and for the data published by layer-2 protocols it means sharding data.
+
+Before turning to protocol changes, \autoref{sec:bg:workload} covers optimizations that leave the protocol alone but rely on the workload behaving well.
+Parallel execution assumes that concurrent transactions rarely conflict.
+Light nodes, stateless clients and snapshot-based bootstrap assume that recently used state is reused.
+These two assumptions, spatial and temporal locality, are the ones Part~II tests on Ethereum's history.
+
+\autoref{sec:bg:sharding} turns to on-chain scaling by sharding.
+It considers in turn how nodes, transactions and state are assigned to shards, and why transactions that span several shards are expensive.
+It then reviews existing sharded designs and the work on placing state to reduce cross-shard transactions, which \autoref{tab:bg:placement} compares.
+Hash-based placement ignores the workload and makes most transactions cross-shard.
+Optimized placements assign every account explicitly, which is too much metadata at Ethereum's scale.
+Most also leave open who computes the placement and how other nodes can check it.
+Part~III addresses these issues.
+
+\autoref{sec:bg:l2} covers off-chain scaling with layer-2 protocols: rollups, state channels and sidechains.
+Rollups have become the main path for Ethereum, but they move the pressure onto layer~1, which must make their data available.
+The section follows this need from calldata to the blobs of EIP-4844, then to data availability sampling and the Danksharding target.
+The open problem is to disseminate and sample that data within the four seconds that Ethereum's consensus allows, at full scale and despite faulty nodes, and Part~IV addresses it.
 
 \section{Throughput, Latency, and Full-Node Cost Bottlenecks}\label{sec:bg:bottlenecks}
 
-\begin{itemize}
-	\item Throughput is limited because every node re-runs every transaction. Compare with centralized payment systems to give an order of magnitude~\cite{gervais2016security}.
-	\begin{itemize}
-		\item Bitcoin and Ethereum L1 handle tens of transactions per second, card networks thousands.
-		\item Bigger blocks or a higher gas limit mean more expensive nodes and slower propagation~\cite{gervais2016security}.
-	\end{itemize}
-	\item Latency depends on the block interval and on how long finality takes, both limited by propagation and consensus rounds.
-	\begin{itemize}
-		\item On Ethereum a transaction gets in within a 12\,s slot, and is final after about two epochs, so around 13 minutes~\cite{pacheco2023my}.
-	\end{itemize}
-	\item Running a full node costs storage (the state keeps growing), bandwidth (blocks and data) and CPU. If these go up, small participants drop out and the network becomes less decentralized~\cite{gervais2016security}.
-	\begin{itemize}
-		\item The state already holds hundreds of millions of accounts, and the history is much bigger.
-		\item For publishing data, bandwidth is what runs out first. This is the motivation for Part IV.
-	\end{itemize}
-	\item I can mention the trilemma here, but only briefly, as context. It is not what drives the thesis.
-	\item The message I want to get across: L1 and L2 both need to scale, and the general answer is sharding, meaning that no single node handles every transaction or every piece of data.
-	\begin{itemize}
-		\item Sharding computation means not every node executes every transaction (Part III).
-		\item Sharding data means not every node downloads every piece of data (Part IV).
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Throughput is limited because every node re-runs every transaction. Compare with centralized payment systems to give an order of magnitude.
+% 	\item Latency depends on the block interval and on how long finality takes.
+% 	\item Running a full node costs storage, bandwidth and CPU. If these go up, small participants drop out.
+% 	\item Mention the trilemma only briefly, as context.
+% 	\item Message: L1 and L2 both need to scale, and the general answer is sharding (computation in Part III, data in Part IV).
+% \end{itemize}
+
+Full replication (\autoref{sec:bg:ledgers}) makes a blockchain secure without trusted parties, but it costs performance in three ways.
+Throughput is limited by what a single node can process.
+Latency is limited by how quickly blocks propagate and consensus concludes.
+And whatever the system demands of one node, it demands of every node.
+This section looks at each of these limits and at why they cannot be relaxed independently.
+
+\paragraph{Throughput.}
+Every full node executes every transaction, so the chain as a whole processes no more than one node can.
+Bitcoin reaches at most about 7 transactions per second.
+Visa, as a reference payment processor, handles about 2{,}000 per second on average, with peaks at 56{,}000~\cite{croman2016scaling}.
+Ethereum does somewhat better but stays in the same order of magnitude.
+Its gas limit allows at most a few hundred simple transfers per second, and the chain processes around 20 transactions per second on average (\autoref{sec:bg:execution:evm}).
+
+The obvious fix is to raise the parameters: bigger blocks, a higher gas limit, or shorter intervals between blocks.
+Each of these makes blocks take longer to propagate relative to the interval between them.
+That produces more forks, wastes honest work, and makes attacks such as double-spending and selfish mining cheaper~\cite{gervais2016security}.
+Croman et al.\ measured this trade-off on Bitcoin's network in 2016.
+To keep at least 90\% of nodes able to follow the chain, blocks could grow to at most 4\,MB at a 10-minute interval, about 27 transactions per second, and the interval could not go below 12\,s without wasting network bandwidth~\cite{croman2016scaling}.
+Tuning the parameters gains a constant factor at best, not the orders of magnitude separating blockchains from payment networks.
+
+\paragraph{Latency.}
+A transaction is first \emph{included} in a block, then becomes \emph{final}, meaning it can no longer be reverted.
+Both steps are bounded by the protocol.
+On Ethereum, a block is produced every 12\,s slot, but inclusion can take several slots when the network is congested or the fee offered is low~\cite{pacheco2023my}. \mat{CHECK: that Pacheco et al.\ actually support this (fees/congestion delaying inclusion); I did not take a figure from them.}
+Finality comes from Casper FFG and takes two to three epochs, about 13 to 19 minutes (\autoref{sec:bg:eth-pos:forkchoice}).
+Bitcoin offers only probabilistic finality, and users wait for several blocks of ten minutes each before treating a payment as settled~\cite{nakamoto2008bitcoin}. \mat{CHECK: the whitepaper gives the catch-up probability, not the ``wait several blocks'' convention; consider a better source or rephrase.}
+The same propagation and consensus constraints that cap throughput make these delays hard to shorten.
+
+\paragraph{Full-node cost.}
+Running a full node costs storage, bandwidth and computation, and these costs are what keep participation open.
+Ethereum's hardware recommendations for a full node are a 4\,TB NVMe disk, 32\,GB of memory, a four-core CPU, and 50\,Mbps download and 15\,Mbps upload~\cite{eip7870}.
+These are within reach of an individual, and stay so only if the load does not grow.
+Storage grows with the state and the history.
+Ethereum's state holds about 400 million accounts (Part~III). \mat{CHECK: source for 400M accounts (SOAPS states it without citation); make sure Part~III gives the figure and its date.}
+The history up to the Merge alone has 1.7 billion transactions touching 180 million accounts, and replaying it takes about three days and produces a database of about 2\,TB~\cite{pigaglio2023exploring}. \mat{CHECK: the BRAINS paper gives 1.7 billion transactions in Sec.~II-B, 1.9 billion in Sec.~III-C and 1.3 billion in Sec.~IV (different counting); pick one definition and use it consistently in Part~II.}
+Every increase in throughput adds to these costs.
+As they rise, fewer participants can afford a node, and the network concentrates in the hands of those who can, which is precisely what decentralization is supposed to avoid~\cite{gervais2016security,croman2016scaling}.
+
+\paragraph{Data bandwidth.}
+For the data that layer-2 protocols publish on layer~1 (\autoref{sec:bg:l2}), bandwidth runs out first.
+With EIP-4844, every node downloads every blob, which is why only a few blobs of 128\,KB fit in each block~\cite{eip4844} (\autoref{sec:bg:l2:limitations}).
+The Danksharding target of 32\,MB per block~\cite{ethdanksharding} cannot work this way.
+To attest within the first 4\,s of a slot, a node would need to receive the raw data at about 64\,Mbps, or 280\,Mbps for the 140\,MB erasure-coded version.
+Both exceed the recommended 50\,Mbps download~\cite{eip7870}. \mat{CHECK: own back-of-the-envelope numbers (32\,MB and 140\,MB in 4\,s, MB $=10^6$\,B, no protocol overhead). Decide whether to present them as such.}
+
+\paragraph{One answer: sharding.}
+These limits are often summarized as the \emph{scalability trilemma}: a blockchain cannot be simultaneously scalable, secure and decentralized.
+We use it only as a framing.
+The constraint behind it is concrete: as long as every node handles every transaction and every byte of data, capacity is bounded by what one modest node can do.
+Both layers need more capacity.
+Layer~1 must execute more transactions, and must also host the data of a growing number of layer-2 protocols.
+The general way out is \emph{sharding}, in which no single node handles everything.
+Sharding computation means that each node executes only part of the transactions, which Part~III addresses.
+Sharding data means that each node downloads and stores only part of the published data, which Part~IV addresses.
+The rest of this chapter reviews the approaches that lead to these two forms of sharding, and the alternatives that avoid them.
 
 \section{Exploiting Workload Properties}\label{sec:bg:workload}
 
-\begin{itemize}
-	\item Some optimizations leave the protocol alone and instead count on the workload behaving well: few conflicts, and state that gets reused.
-	\item I introduce them here because Part II checks whether those assumptions actually hold on Ethereum.
-	\item Introduce the two kinds of locality informally (Part II gives the formal definitions):
-	\begin{itemize}
-		\item spatial locality, or disjoint access parallelism: transactions running at the same time touch different state;
-		\item temporal locality: state used recently is likely to be used again soon.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Some optimizations leave the protocol alone and instead count on the workload behaving well: few conflicts, and state that gets reused.
+% 	\item I introduce them here because Part II checks whether those assumptions actually hold on Ethereum.
+% 	\item Introduce the two kinds of locality informally (Part II gives the formal definitions).
+% 	\item Preview of Part II: good locality overall, a minority of accounts cause most of the bad behaviour, and the two sets differ.
+% \end{itemize}
+
+Before changing the protocol, one can make each node do its work faster or with fewer resources.
+Several optimizations do this without touching consensus or the data model.
+They rely instead on the transaction workload behaving well, and the property they assume is some form of \emph{locality}, the same notion that underlies caches in computer systems.
+A program does not touch its whole address space at once.
+Over a short period, it uses a small \emph{working set}, and a system that keeps that set close at hand runs almost as fast as if everything were~\cite{denning1968working}.
+Two kinds of locality matter for blockchains.
+Part~II gives their formal definitions.
+
+\emph{Temporal locality} means that state used recently is likely to be used again soon.
+If it holds, a node can keep the recently used part of the state in memory, or even keep only that part, and fetch or prove the rest on demand.
+Light nodes, stateless clients and snapshot-based bootstrap all rely on it (\autoref{sec:bg:workload:light}).
+
+\emph{Spatial locality} means that transactions issued around the same time fall into groups that touch disjoint sets of accounts.
+Its consequence is \emph{disjoint access parallelism}: groups that share no state can be processed independently, by different cores of one node (\autoref{sec:bg:workload:parallel}) or by different shards (\autoref{sec:bg:sharding}).
+
+Many designs assume these properties without measuring them on a real workload~\cite{pigaglio2023exploring}.
+Part~II measures them on the full history of Ethereum.
+Its main finding is that the workload generally shows good locality of both kinds, but a small minority of accounts is responsible for most of the behavior that defeats caching or parallelism.
+These two minorities are largely distinct.
+In the pre-Merge history, about 3.2 million accounts stand out for poor temporal locality and as many for poor spatial locality, but only about 0.6 million belong to both sets~\cite{pigaglio2023exploring}. \mat{CHECK: numbers from Table~I of the BRAINS paper (pre-Merge data). Update if Part~II is redone on recent data.}
+Each property therefore calls for its own handling.
+Part~III builds on the minority that hurts spatial locality: it places a small set of high-impact accounts explicitly and leaves all other accounts to the default rule.
 
 \subsection{Parallel Transaction Execution}\label{sec:bg:workload:parallel}
 
-\begin{itemize}
-	\item The idea is to run transactions that do not conflict at the same time inside a block.
-	\begin{itemize}
-		\item The result must still be the same as running them one by one in block order.
-	\end{itemize}
-	\item Three ways to do it: declare access lists up front (EIP-2930, Solana), run optimistically and redo on conflict (Block-STM~\cite{gelashvili2023blockstm}), or have the proposer compute a schedule (Dickerson et al.~\cite{dickerson2017concurrency}).
-	\begin{itemize}
-		\item With declared access lists, declaring too much loses parallelism and declaring too little makes the transaction fail.
-		\item The optimistic approach needs nothing from users, but it slows down when there are many conflicts~\cite{gelashvili2023blockstm}.
-		\item In Dickerson et al., the proposer runs the block speculatively and publishes a schedule that validators can replay in parallel~\cite{dickerson2017concurrency}.
-	\end{itemize}
-	\item How well any of this works depends on how many transactions conflict, which is the spatial locality measured in Part II.
-	\item I do not contribute to parallel execution myself. I mention it because Part II's results say something about it, and I come back to it only as a perspective.
-\end{itemize}
+% \begin{itemize}
+% 	\item Run non-conflicting transactions concurrently; result must equal sequential execution in block order.
+% 	\item Three approaches: declared access lists, optimistic execution, proposer-computed schedule.
+% 	\item Effectiveness depends on conflicts, i.e., spatial locality (Part II). Not a contribution of this thesis; perspective only.
+% \end{itemize}
+
+Ethereum executes the transactions of a block one after the other (\autoref{sec:bg:execution:evm}).
+Parallel execution runs transactions that do not conflict at the same time.
+The result must stay the same as if the block had been executed sequentially in its order: otherwise, nodes executing the block differently would end up with different states.
+In the account-based model, which transactions conflict is generally known only after they have run (\autoref{sec:bg:state-model:account}).
+Proposals differ mainly in how they get around this. \autoref{sec:bg:execution:alternatives} introduced some of the resulting designs; here we compare them by how they deal with conflicts.
+
+The first approach is to have transactions \emph{declare} the state they access.
+Solana requires every transaction to list the accounts it reads and writes, and schedules in parallel the transactions whose lists do not overlap~\cite{yakovenko2019sealevel}.
+The schedule is then exact, but the burden falls on users and developers.
+A transaction that declares too much loses parallelism, and one that declares too little cannot access the state it needs.
+Ethereum's access lists~\cite{eip2930} are optional and not enforced, so they cannot serve this purpose as they stand.
+
+The second approach is \emph{optimistic}.
+Block-STM, used by Aptos, runs the transactions of a block in parallel as if they did not conflict, records what each one reads and writes, and re-executes those that read a value a preceding transaction later changed~\cite{gelashvili2023blockstm}.
+OptSmart applies software transactional memory in the same spirit~\cite{anjana2022optsmart}. \mat{CHECK: description of OptSmart (STM-based execution, conflict graph shared with validators) against the paper.}
+These designs require nothing from users.
+Their performance, however, depends directly on the workload: when many transactions touch the same accounts, re-executions pile up, and the speedup shrinks toward that of sequential execution~\cite{gelashvili2023blockstm}. \mat{CHECK: Block-STM behavior under high contention against the paper's evaluation.}
+Forerunner takes a different angle and speculatively executes pending transactions before the block that contains them arrives, so that their results can be reused once the actual order is known~\cite{chen2021forerunner}. \mat{CHECK: description of Forerunner.}
+
+The third approach shares the cost of discovering conflicts.
+In the design of Dickerson et al., the block producer executes the block speculatively and publishes the schedule it found, which validators then replay in parallel and deterministically~\cite{dickerson2017concurrency}.
+OptSmart likewise lets the producer ship the conflict graph of the block alongside it~\cite{anjana2022optsmart}.
+ParBlockchain, for permissioned blockchains, orders transactions first and builds a dependency graph that lets executors process independent transactions concurrently~\cite{amiri2019parblockchain}. \mat{CHECK: description of ParBlockchain (order-execute, dependency graph).}
+
+All three approaches gain only as much as the workload allows.
+Transactions that touch the same account must still run one after the other, so a few very popular contracts can serialize a large part of a block.
+How much parallelism the Ethereum workload actually offers is a question of spatial locality, and Part~II measures it.
+This thesis does not contribute to parallel execution itself.
+We return to it only as a perspective, in light of the results of Part~II.
 
 \subsection{Light Nodes and Stateless Clients}\label{sec:bg:workload:light}
 
-\begin{itemize}
-	\item Light clients check headers and Merkle proofs instead of keeping the whole state~\cite{chatzigiannis2022sok}.
-	\begin{itemize}
-		\item They trust that the majority of the consensus (in Ethereum, of the sync committee) is honest. On their own they cannot spot an invalid block or missing data~\cite{chatzigiannis2022sok}.
-		\item Fraud proofs and data availability sampling were proposed to fix that~\cite{albassam2021fraud}. This leads into \autoref{sec:bg:l2:limitations}.
-	\end{itemize}
-	\item Stateless clients go further: blocks come with witnesses for the state they touch, and caching recently used state makes those witnesses smaller.
-	\begin{itemize}
-		\item Witness size costs bandwidth, and the trie design (Merkle Patricia vs.\ Verkle or binary trees) changes how big the proofs are.
-	\end{itemize}
-	\item How well this works depends on how often state is reused, which is the temporal locality measured in Part II.
-\end{itemize}
+% \begin{itemize}
+% 	\item Light clients: headers + Merkle proofs, trust the sync committee; cannot detect invalid blocks or missing data; fraud proofs and DAS.
+% 	\item Partial-state variants (CoVer, subset nodes), snapshot-based bootstrap (Ethanos, Fynn et al.).
+% 	\item Stateless clients: witnesses; trie design changes proof size.
+% 	\item Depends on temporal locality (Part II).
+% \end{itemize}
+
+The other way to lower the cost of a node is to keep less of the state.
+At the extreme, a light client stores only block headers and checks the values it cares about, such as its own balance, using Merkle proofs against the state root in a header~\cite{chatzigiannis2022sok}.
+In Ethereum, it follows the headers signed by the sync committee (\autoref{sec:bg:eth-pos:slots}).
+The price is trust.
+A light client executes nothing, so it accepts whatever block the majority of the committee signs, and on its own it can detect neither an invalid state transition nor data that was never published~\cite{chatzigiannis2022sok}.
+Fraud proofs and data availability sampling were proposed to close this gap: a full node that finds an invalid block can prove it to light clients, provided the data needed to do so is available~\cite{albassam2021fraud}.
+The second condition is the data availability problem that \autoref{sec:bg:l2:limitations} returns to.
+
+Between light clients and full nodes, several designs keep part of the state.
+Subset nodes store and track only the part of the state that matters to their owner~\cite{paavolainen2021subset}.
+In CoVer, light nodes collectively verify blocks and keep the data available between them, without relying on full nodes~\cite{cao2020cover}. \mat{CHECK: description of CoVer and of subset nodes.}
+A related problem is bootstrapping a new full node.
+Instead of replaying the history from genesis, it can start from a recent snapshot of the state and then follow the chain.
+Ethanos periodically sweeps accounts that have been inactive, so that a new node only needs the recently active ones, and old accounts must be restored with a proof when they are used again~\cite{kim2021ethanos}. \mat{CHECK: description of Ethanos (sweeping inactive accounts, restore with proof).}
+Fynn et al.\ propose a fast and robust protocol for synchronizing a node's state from its peers~\cite{fynn2022robust}. \mat{CHECK: bib entry fynn2022robust: author list not verified (the BRAINS paper credits ``Robert Fynn''), and description of the paper.}
+These designs pay off only if the state that is recently used, or that changes between two snapshots, is a small part of the whole.
+
+Stateless clients take the idea furthest.
+A stateless node keeps no state at all.
+Each block comes with a \emph{witness}, the Merkle proofs for every piece of state the block reads or writes, so that any node can execute the block against the state root alone.
+Witnesses cost bandwidth, and their size depends on the structure of the state tree.
+Ethereum has therefore considered replacing its Merkle Patricia trie with trees that give shorter proofs, such as Verkle or binary trees. \TODO{cite (Verkle trees / EIP for the binary state tree)}
+Nodes that cache recently used state can skip the corresponding parts of the witness.
+
+The benefit of all these designs depends on how often recently used state is reused, and on how much of the state a node actually needs at a given time.
+That is temporal locality, which Part~II measures.
 
 \section{On-Chain Scaling: Sharding}\label{sec:bg:sharding}
 
-\begin{itemize}
-	\item The principle: split nodes, state and transaction processing over several chains running in parallel (shards), each with its own committee, and coordinate them through a beacon chain~\cite{wang2019sok}.
-	\begin{itemize}
-		\item In the ideal case, throughput grows linearly with the number of shards.
-		\item The beacon chain keeps the validator list and the randomness, assigns validators to shards, and records checkpoints (cross-links) of shard blocks.
-	\end{itemize}
-	\item Security: a small committee is easier to take over, which is why nodes are assigned at random and reshuffled regularly~\cite{avarikioti2023divide}.
-	\begin{itemize}
-		\item Show how the chance of a corrupted committee depends on committee size and on the overall share of malicious nodes (hypergeometric tail). Committees are made big enough for this to be negligible.
-		\item Avarikioti et al.\ give a formal definition of what robust sharding should guarantee, including against adaptive adversaries~\cite{avarikioti2023divide}.
-	\end{itemize}
-	\item Following Wang et al.~\cite{wang2019sok}, split the discussion into network, transaction and state sharding.
-	\item Reuse the SOAPS figure that shows a sharded blockchain with an intra-shard and a cross-shard transaction.
-\end{itemize}
+% \begin{itemize}
+% 	\item Principle: split nodes, state and transaction processing over shards with their own committee, coordinated by a beacon chain.
+% 	\item Security: small committees are easier to take over; random assignment and reshuffling; hypergeometric tail; Avarikioti et al.
+% 	\item Split into network, transaction and state sharding (Wang et al., Al Barat et al.); placement and cross-shard handling.
+% 	\item Reuse the SOAPS intra-/cross-shard figure.
+% \end{itemize}
+
+Sharding applies to blockchains the idea that distributed databases use to scale: partition the work.
+The nodes, the state and the processing of transactions are split across several \emph{shards} that run in parallel.
+Each shard has its own committee of nodes, which runs consensus on the blocks of that shard only~\cite{wang2019sok,al2024sok}.
+A coordinating chain, the \emph{beacon chain} in Ethereum's terminology, keeps the list of nodes and a source of randomness.
+It assigns nodes to shards and records periodic checkpoints of every shard, which tie the shards into a single system.
+Ethereum's beacon chain was designed for this role (\autoref{sec:bg:eth-pos}).
+If shards rarely need each other, a system with $k$ shards processes up to $k$ times more transactions than a single chain, while each node still handles the load of one shard.
+
+The price is security.
+Taking over a whole blockchain requires controlling a large share of all nodes or all stake.
+Taking over one shard only requires controlling enough of its committee, which is much smaller.
+Committees are therefore formed at random, so that an attacker cannot choose where its nodes go.
+The probability that a committee is compromised then follows from sampling without replacement.
+Consider $N$ nodes, a fraction $f$ of which are malicious, and a committee of $m$ nodes drawn uniformly at random.
+The number $X$ of malicious members follows a hypergeometric distribution, and a BFT committee fails when $X \geq m/3$:
+\[
+	\Pr\left[X \geq \lceil m/3 \rceil\right] = \sum_{x=\lceil m/3 \rceil}^{m} \frac{\binom{fN}{x}\binom{(1-f)N}{m-x}}{\binom{N}{m}}.
+\]
+This probability falls quickly with $m$.
+With $N = 10{,}000$ and $f = 1/4$, it is about $3\times10^{-2}$ for committees of 100 nodes, $6\times10^{-5}$ for 400 nodes, and $10^{-6}$ for 600 nodes. \mat{CHECK: own computation (exact hypergeometric tail, Python); decide whether to keep these numbers or cite the equivalent figures of OmniLedger/RapidChain.}
+Sharded designs pick committees large enough for this probability to be negligible over the lifetime of the system.
+This bounds the number of shards that a given number of nodes can support.
+Ethereum's committees, with at least 128 members, follow the same reasoning (\autoref{sec:bg:eth-pos:committees}).
+Random assignment alone does not stop an \emph{adaptive} adversary, which corrupts nodes after seeing where they were assigned.
+Committees are therefore reshuffled regularly.
+Avarikioti et al.\ formalize the properties that a robust sharded blockchain must guarantee, including against such adversaries, and show which design elements they require~\cite{avarikioti2023divide}.
+
+Following Wang et al.~\cite{wang2019sok} and Al Barat et al.~\cite{al2024sok}, the rest of this section separates three aspects of sharding.
+\emph{Network sharding} assigns nodes to shards (\autoref{sec:bg:sharding:network}).
+\emph{Transaction sharding} assigns transactions to shards (\autoref{sec:bg:sharding:transaction}).
+\emph{State sharding} assigns the state, in our case accounts, to shards, and determines which transactions span several of them (\autoref{sec:bg:sharding:state}).
+For an account-based blockchain, the questions that matter are therefore where nodes, state and transactions are \emph{placed}, and how transactions that cross shards are \emph{handled}.
+\autoref{sec:bg:sharding:limitations} then reviews existing designs and the work on optimizing state placement.
 
 \subsection{Network Sharding}\label{sec:bg:sharding:network}
 
-\begin{itemize}
-	\item This is about splitting nodes into committees (node placement).
-	\begin{itemize}
-		\item A node then only takes part in consensus and gossip for its own shard.
-	\end{itemize}
-	\item Assignment uses randomness that can be verified: RandHound in OmniLedger~\cite{omniLedger}, the Cuckoo rule in RapidChain~\cite{rapidchain}, RANDAO in Ethereum~\cite{nagy2025forking}. The goal is to resist Sybil and adaptive attackers.
-	\begin{itemize}
-		\item Elastico creates identities with PoW puzzles~\cite{elastico}, while PoS designs use stake.
-		\item Reshuffling every epoch leaves an adaptive attacker little time to corrupt a committee, but every move forces nodes to download the state of their new shard.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Node placement into committees; a node only does consensus and gossip for its shard.
+% 	\item Verifiable randomness: RandHound (OmniLedger), Cuckoo rule (RapidChain), RANDAO (Ethereum). Sybil and adaptive attackers.
+% 	\item Elastico: PoW identities; PoS: stake. Reshuffling vs.\ state download cost.
+% \end{itemize}
+
+Network sharding decides which nodes serve which shard.
+A node then takes part in consensus, and in the dissemination of blocks and transactions, for its own shard only, so its load no longer grows with the total activity of the system.
+Two threats shape how nodes are assigned.
+
+The first is the Sybil attack, in which an attacker creates many identities to fill a committee~\cite{douceur2002sybil}.
+Identities must therefore cost something.
+Elastico requires each node to solve a proof-of-work puzzle before every epoch, and the solution also determines the committee it joins~\cite{elastico}.
+Proof-of-stake designs, Ethereum included, weight identities by stake instead (\autoref{sec:bg:consensus:pos}).
+
+The second is the attacker who chooses, or predicts, where its nodes end up.
+Assignment must then be random, unpredictable before it happens, and verifiable by everybody after.
+OmniLedger generates the randomness with RandHound, a distributed protocol for unbiasable public randomness~\cite{omniLedger}.
+RapidChain uses the Cuckoo rule when nodes join and leave, which keeps the malicious nodes spread across committees even when the attacker controls the order of arrivals~\cite{rapidchain}.
+Ethereum assigns validators to committees with a shuffle seeded by the RANDAO value (\autoref{sec:bg:eth-pos:committees}), whose last contributors can bias it slightly by withholding their block~\cite{nagy2025forking}. \mat{CHECK: that Nagy et al.\ support this wording (their attack uses forking; withholding is the classic bias).}
+
+Reshuffling has a cost.
+A node that moves to a new shard must obtain the current state of that shard before it can validate its blocks.
+Frequent reshuffling leaves an adaptive attacker little time to corrupt a committee, but makes nodes download state over and over.
+Designs therefore reshuffle once per epoch, or move only part of each committee at a time~\cite{omniLedger}. \mat{CHECK: that OmniLedger swaps validators gradually (bounded fraction per epoch); cite the exact mechanism or drop.}
 
 \subsection{Transaction Sharding}\label{sec:bg:sharding:transaction}
 
-\begin{itemize}
-	\item Transactions are usually sent to the shard of the sender or caller~\cite{omniLedger,rapidchain}.
-	\begin{itemize}
-		\item It is simple, everyone knows the rule, and clients need no extra information.
-	\end{itemize}
-	\item Each shard has its own mempool. Other routing rules have been proposed but are uncommon.
-	\begin{itemize}
-		\item Where a transaction goes only matters together with where its state lives: it is cheap only if all its state is in the same shard.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Transactions usually go to the shard of the sender or caller. Simple, known rule.
+% 	\item One mempool per shard; other routing rules uncommon. Only matters together with state placement.
+% \end{itemize}
+
+Transaction sharding decides which shard processes a transaction.
+Each shard keeps its own pool of pending transactions, and its committee includes them in its blocks.
+The most common rule sends a transaction to the shard of its sender, or of the account it calls first~\cite{omniLedger,rapidchain}. \mat{CHECK: OmniLedger and RapidChain are UTXO-based (transactions go to input/output shards); find an account-based source for the sender-shard rule or reword.}
+The rule is simple, known to everyone, and requires no information beyond the address of the sender.
+Other routing rules have been proposed, for example to balance load between shards, but they remain uncommon~\cite{li2025novel}.
+
+Where a transaction is sent matters only in relation to where its state lives.
+A transaction is cheap when all the state it accesses sits in the shard that processes it, and expensive otherwise, whatever the routing rule.
+The decisive question is therefore how the state is placed.
 
 \subsection{State Sharding}\label{sec:bg:sharding:state}
 
-\begin{itemize}
-	\item Each shard keeps only part of the state. Where each account lives must be known by everyone and the load must be balanced.
-	\begin{itemize}
-		\item Everyone needs to know where an account lives in order to route transactions to it.
-		\item No shard should become the bottleneck, either for storage or for processing.
-	\end{itemize}
-	\item Most designs hash the account address modulo the number of shards: Chainspace~\cite{albassam2018chainspace}, Monoxide~\cite{wang2019monoxide}, Elastico~\cite{elastico}, and the Ethereum sharding proposals.
-	\begin{itemize}
-		\item No metadata to store and a uniform spread, but it completely ignores which accounts talk to each other.
-	\end{itemize}
-	\item Intra-shard vs.\ cross-shard transactions. Cross-shard ones need an atomic commit across shards, typically two-phase commit (lock, vote, commit or abort), which costs extra consensus rounds and messages~\cite{omniLedger}.
-	\begin{itemize}
-		\item OmniLedger (Atomix): the client locks inputs in each shard, then unlocks or commits~\cite{omniLedger}.
-		\item RapidChain splits a cross-shard transaction into sub-transactions that go through the output shard~\cite{rapidchain}.
-		\item Monoxide uses relay transactions and only gets eventual atomicity~\cite{wang2019monoxide}. BrokerChain uses broker accounts whose state is spread over several shards~\cite{huang2022brokerchain}.
-		\item Whatever the protocol, you pay extra latency and messages, state stays locked for a while, and some transactions abort.
-	\end{itemize}
-	\item With hash placement, most Ethereum transactions become cross-shard. Part III gives the actual number.
-	\begin{itemize}
-		\item Quick intuition: with $k$ shards, two random accounts land in the same shard with probability $1/k$, and a transaction touching more accounts is almost never local.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Requirements: globally known location, load balance. Hash placement. Intra- vs cross-shard; 2PC; Atomix, RapidChain, Monoxide, BrokerChain.
+% 	\item Hash placement makes most Ethereum transactions cross-shard; even an ideal placement leaves many.
+% \end{itemize}
+
+\begin{figure}[t]
+	\centering
+	\input{figures/sharding_crossshard.tex}
+	\caption{Intra-shard vs.\ cross-shard transactions.
+		\textbf{(top)}~An \emph{intra-shard} transaction ($a_1 \to a_4$, both in $S_1$) completes in a single consensus round.
+		\textbf{(bottom)}~A \emph{cross-shard} transaction ($a_1 \to a_2$ across $S_1$ and $S_2$) requires two-phase commit: Phase~1 locks state and collects votes; Phase~2 broadcasts commit or abort, adding at least one extra consensus round.}
+	\label{fig:bg:crossshard}
+\end{figure}
+
+State sharding splits the state itself, so that each shard stores and updates only its own part.
+This is the form of sharding that reduces the storage and execution load of each node, and the one Part~III deals with.
+A placement of accounts on shards must satisfy two requirements.
+It must be known to everybody, because nodes and clients must know where an account lives in order to route transactions that use it.
+And it must balance the load, so that no shard becomes a bottleneck, in storage or in processing.
+
+Most designs meet both requirements with a hash function: an account with address $a$ lives in shard $h(a) \bmod k$~\cite{al2024sok}.
+Chainspace~\cite{albassam2018chainspace}, Monoxide~\cite{wang2019monoxide} and Elastico~\cite{elastico} place state this way, as did the Ethereum sharding proposals. \mat{CHECK: Elastico shards transaction processing but, as far as I know, not storage (all nodes keep the full ledger); it may not belong in this list (it comes from TxAllo's list via SOAPS).} \TODO{cite a primary source for Ethereum's hash-based placement (the SOAPS paper cites EIP-4844, which does not cover it)}
+Hash placement needs no metadata, since anybody can compute the shard of any account, and spreads accounts uniformly.
+But it ignores entirely which accounts are used together.
+
+A transaction is \emph{intra-shard} when all the state it accesses is in one shard.
+It then executes in one consensus round of that shard, with no communication with the others.
+It is \emph{cross-shard} when its state spans several shards.
+The shards involved must then agree to either all apply the transaction or none of them, which requires an atomic commitment protocol~\cite{adhikari2025transaction}.
+The classical choice is two-phase commit, illustrated in \autoref{fig:bg:crossshard}.
+A coordinator shard, typically that of the caller, locks its state and sends a \emph{propose} message to each other shard involved.
+Each of them locks the state concerned and replies with a vote.
+If every vote is positive, the coordinator commits in a second phase and all shards apply the update; otherwise, all shards abort and release their locks.
+Each phase involves the consensus of the shards involved, so a cross-shard transaction takes at least one more consensus round than an intra-shard one, plus messages between shards.
+
+Several protocols refine this scheme.
+In OmniLedger's Atomix, the client itself drives the protocol: it collects proofs that its inputs are locked in each input shard, then presents them to commit, or to unlock if one of them failed~\cite{omniLedger}.
+RapidChain splits a cross-shard transaction into sub-transactions that move the inputs into the shard of the output, which then executes the transaction locally~\cite{rapidchain}.
+Monoxide uses relay transactions between shards and gives up on immediate atomicity in favor of eventual atomicity~\cite{wang2019monoxide}.
+BrokerChain lets broker accounts hold state in several shards, so that some transfers can go through a broker instead of crossing shards~\cite{huang2022brokerchain}.
+Zhang et al.\ survey these and other optimizations~\cite{zhang2025survey}.
+They reduce the overhead of cross-shard transactions, but none removes it: the extra latency and messages, the time during which state stays locked, and the transactions that abort all remain.
+How many transactions are cross-shard is therefore a first-order factor in the performance of a sharded blockchain.
+
+Under hash placement, nearly all of them are.
+With $k$ shards, two accounts land in the same shard with probability $1/k$, and a transaction touching $n$ distinct accounts is intra-shard with probability $(1/k)^{n-1}$.
+Since Ethereum transactions often involve several contracts (\autoref{sec:bg:execution}), very few remain local.
+On recent Ethereum traces, with 64 shards, 94.6\% of transactions would be cross-shard (Part~III). \mat{CHECK: 94.6\% comes from the SOAPS paper; keep in sync with the final Part~III numbers.}
+Even an ideal placement cannot bring this to zero.
+Part~II partitions each window of one million transactions of the pre-Merge history with METIS, with complete knowledge of the accounts that the window accesses.
+About 25\% of transactions still cross partitions with 16 partitions, and 30\% with 64.
+This share has grown steadily over Ethereum's history~\cite{pigaglio2023exploring}, consistent with the observations of the authors of OptChain~\cite{Nguyen2019}. \mat{CHECK: METIS 25--30\% figures are pre-Merge (BRAINS paper); update if Part~II is redone.}
+The two figures come from different datasets and should not be compared directly, but together they bound the problem.
+Hash placement leaves almost every transaction cross-shard, and a placement aware of the workload can do much better, but not perfectly.
 
 \subsection{Existing Sharded Blockchains and Their Limitations}\label{sec:bg:sharding:limitations}
 
-\begin{itemize}
-	\item Go through the main designs: OmniLedger~\cite{omniLedger}, RapidChain~\cite{rapidchain}, Chainspace~\cite{albassam2018chainspace}, Monoxide~\cite{wang2019monoxide}, Elastico~\cite{elastico}, with Wang et al.'s survey~\cite{wang2019sok} as a starting point. Then tell how Ethereum dropped execution sharding and moved to rollups plus data sharding~\cite{pigaglio2025pandas}.
-	\begin{itemize}
-		\item Put them in a table: node placement, state placement, transaction placement, cross-shard protocol.
-		\item Some sharded chains are running outside Ethereum (NEAR, MultiversX). Mention them without going into detail.
-	\end{itemize}
-	\item First problem: hash placement does not look at the workload at all, so the cross-shard ratio is very high~\cite{krol2021shard}.
-	\item A lot of work tries to place state better and cuts the number of cross-shard transactions:
-	\begin{itemize}
-		\item The idea comes from databases. Schism partitions tuples with METIS on the graph of what is accessed together~\cite{curino2010schism,karypis1998fast}, and Mehta et al.\ re-shard adaptively in an untrusted setting~\cite{mehta2025adaptive}.
-		\item Graph-based placement: TxAllo~\cite{txallo}, BrokerChain~\cite{huang2022brokerchain}. Community detection is also common.
-		\item Learning-based: Spring uses deep reinforcement learning~\cite{li2024spring}.
-		\item At the transaction level, OptChain picks a shard for each transaction to avoid cross-shard ones~\cite{Nguyen2019}.
-		\item They all report big drops in the cross-shard ratio on Ethereum traces.
-	\end{itemize}
-	\item Second problem: they give an explicit location to \emph{every} account. At Ethereum's scale that is hundreds of MB of metadata that every node must keep in sync.
-	\item Third problem: a single coordinator decides the placement, or the paper does not say who does. This opens the door to centralization and to people optimizing for themselves, and none of it is tied to consensus.
-	\begin{itemize}
-		\item Usually nobody says who runs the optimizer, on what input, or how the others can check the result.
-		\item Whoever controls placement could favour their own accounts (cheaper, faster) or put victims in the same shard to attack them.
-	\end{itemize}
-	\item Another line of work adjusts things at runtime, moving accounts around (Król et al.~\cite{krol2021shard}, Huang et al.~\cite{huang2024account}, BIND~\cite{qi2026bind}) or scheduling transactions together (Concordia~\cite{liu2026concordia}). They pay for it in migration or scheduling overhead.
-	\begin{itemize}
-		\item Migration locks state while it moves~\cite{huang2024account}. BIND manages to keep processing transactions during the move~\cite{qi2026bind}.
-		\item Concordia has shards cooperate when scheduling to avoid cross-shard conflicts~\cite{liu2026concordia}.
-	\end{itemize}
-	\item What is missing is a placement that stays small, that anyone can check, and that is part of consensus. That is what Part III does.
-\end{itemize}
+% \begin{itemize}
+% 	\item Main designs (OmniLedger, RapidChain, Chainspace, Monoxide, Elastico); Ethereum dropped execution sharding.
+% 	\item Problem 1: hash placement ignores the workload. Placement optimization: three families.
+% 	\item Problem 2: explicit placement of every account. Problem 3: governance.
+% 	\item Runtime approaches: migration, scheduling. Comparison table. What is missing (Part III).
+% \end{itemize}
+
+The first generation of sharded blockchains established the techniques described above.
+Elastico was the first to shard transaction processing in an open setting, with proof-of-work identities and committees re-formed every epoch~\cite{elastico}.
+OmniLedger added secure randomness for committee formation, gradual reconfiguration, and the Atomix protocol for cross-shard transactions~\cite{omniLedger}.
+RapidChain reduced communication within committees and handled the joining and leaving of nodes with the Cuckoo rule~\cite{rapidchain}.
+Chainspace sharded a platform for smart contracts over objects, with a commit protocol across shards~\cite{albassam2018chainspace}.
+Monoxide relaxed cross-shard atomicity to scale to many zones~\cite{wang2019monoxide}. \mat{CHECK: one-line summaries of Elastico, OmniLedger, RapidChain, Chainspace and Monoxide against the papers.}
+Elastico, OmniLedger and RapidChain target UTXO payments, Chainspace manipulates objects, and Monoxide uses accounts. All of them place state, or transactions, by hash, and so pay for cross-shard transactions on a large share of the workload. \mat{TODO: consider a small table (node placement, state placement, transaction placement, cross-shard protocol) for these designs; the SOAPS draft had one, check each cell against the papers.}
+
+Some sharded blockchains are in production, such as NEAR and MultiversX. \mat{TODO: cite NEAR (Nightshade) and MultiversX (Adaptive State Sharding) or drop.}
+Ethereum, however, abandoned execution sharding.
+Its earlier roadmap planned shard chains, each with its own state and transactions, coordinated by the beacon chain.
+It moved instead to a single execution chain, with rollups for scaling execution and sharding of data only, in the Danksharding design~\cite{feist2022newsharding,ethdanksharding}.
+\autoref{sec:bg:l2} returns to this choice.
+The beacon chain kept the role that sharding had given it, and SOAPS builds on that design (Part~III).
+
+\paragraph{Optimizing state placement.}
+The first limitation of these designs is that hash placement ignores the workload~\cite{krol2021shard}.
+A large body of work places state so as to reduce cross-shard transactions while keeping the load balanced.
+Fynn and Pedone first raised the question of a globally good partitioning of blockchain state~\cite{fynn2018challenges}.
+Finding an optimal placement is NP-hard~\cite{mizrahi2020blockchain}, so practical approaches model past transactions as an \emph{interaction graph}, whose vertices are accounts and whose edges join accounts used by the same transactions.
+They then apply graph partitioning or community detection to group accounts that are used together.
+The idea comes from distributed databases.
+Schism partitions tuples with METIS~\cite{karypis1998fast} on the graph of tuples accessed by the same transactions~\cite{curino2010schism}, and Marlin re-shards Byzantine-resilient databases as their workload shifts~\cite{mehta2025adaptive}.
+
+For account-based blockchains, these proposals fall into three families.
+\emph{Reactive}, node-initiated approaches let shards migrate accounts on the fly, according to the cross-shard traffic they observe~\cite{mizrahi2020blockchain,krol2021shard} or to load imbalance~\cite{toulouse2022distributed}.
+\emph{Periodic}, global approaches recompute an account-to-shard map at fixed intervals and broadcast it to all nodes.
+They use community detection algorithms such as Louvain~\cite{blondel2008fast,zhang2022community}, label propagation~\cite{li2022achieving}, or the CPLA algorithm of ShardCutter~\cite{huang2026shardcutter}.
+TxAllo refines the global map locally in each shard~\cite{txallo}, and EfShard indexes it with a layered combination of hashing and fine-grained mapping~\cite{efShard}.
+BrokerChain also partitions the interaction graph, and spreads the most active accounts over several shards through its brokers~\cite{huang2022brokerchain}.
+\emph{Predictive} approaches anticipate future interactions, with reinforcement learning (Spring~\cite{li2024spring}, Haider et al.~\cite{haider2025ai}), or give newly created accounts an informed first placement (TransShard~\cite{wang2024transshard}, Li et al.~\cite{li2025novel}).
+At the level of transactions, OptChain chooses the shard of each new transaction to minimize future cross-shard transactions~\cite{Nguyen2019}.
+It targets the UTXO model, however, and was evaluated on Bitcoin, so it does not compare directly with the account-based schemes. \mat{CHECK: that OptChain's evaluation uses Bitcoin data.}
+The account-based schemes are mostly evaluated on Ethereum traces, and report large reductions of the cross-shard ratio.
+Zhang et al., for instance, report up to 50\% fewer cross-shard transactions with 16 shards while keeping the load balanced~\cite{zhang2022community}. \TODO{check this figure in zhang2022community (it comes from commented-out SOAPS draft text)}
+
+\paragraph{The cost of explicit placement.}
+These gains come at a cost that most of this work leaves aside.
+Every account receives an explicit location, which every node must know in order to route transactions.
+Ethereum has about 400 million accounts.
+Even with a single byte per shard identifier, the map takes about 400\,MB, which every node must store and keep synchronized each time the placement changes. \mat{CHECK: source for 400M accounts (SOAPS states it without citation); make sure Part~III gives the figure and its date.}
+Hash placement needs none of this.
+Only Mizrahi and Rottenstreich bound this state explicitly~\cite{mizrahi2020blockchain}, and Haider et al.\ partially~\cite{haider2025ai}.
+
+\paragraph{Who decides the placement.}
+The last limitation is governance.
+Most proposals have a single coordinator compute the placement, or do not say who computes it, on what input, or how other nodes can check the result.
+In an open blockchain, this matters.
+Cross-shard transactions are slower, so whoever controls placement can give its own accounts, or those of an application it runs, a better placement at the expense of a better global one.
+We call this \emph{selfish optimization}.
+It could also choose the shard of a target account, removing one of the conditions that an attacker otherwise has to meet: that the shard whose committee it manages to control is the one that happens to hold the target.
+A few designs do make placement verifiable.
+Li et al.~\cite{li2022achieving}, ShardCutter~\cite{huang2026shardcutter} and BrokerChain~\cite{huang2022brokerchain} run it through consensus, but at the price of having every node, or a whole BFT committee, redo the expensive optimization. \mat{CHECK: this characterization of Li et al., ShardCutter and BrokerChain comes from the SOAPS intro; confirm against each paper.}
+EfShard is the only prior design whose placement is both auditable and incentivized~\cite{efShard}.
+
+\paragraph{Adjusting at runtime.}
+Another line of work leaves the placement mostly alone and reduces the cost of cross-shard activity as it happens.
+Some designs migrate accounts between shards: Król et al.\ move accounts towards the shards they interact with~\cite{krol2021shard}, and Huang et al.\ lock accounts during their migration with a fine-tuned mechanism~\cite{huang2024account}.
+BIND goes further and keeps processing transactions on an account while it migrates~\cite{qi2026bind}.
+Concordia instead has shards cooperate when scheduling transactions, to avoid cross-shard conflicts~\cite{liu2026concordia}.
+These approaches pay a runtime cost in migration or scheduling overhead, rather than in placement metadata.
+
+\paragraph{Summary.}
+\autoref{tab:bg:placement} compares the placement optimizations against six criteria.
+Two are the optimization targets: \emph{load balancing} keeps storage and processing even across shards, and \emph{cross-shard reduction} cuts the number of cross-shard transactions.
+The other four concern integration in an open blockchain.
+\emph{Auditable} means any node can check the placement it is given.
+\emph{Incentivized} means computing a correct placement is rewarded and deviating penalized.
+\emph{Adaptive} means the placement follows changes in the workload.
+\emph{State-bounded} means the placement metadata that every node keeps does not grow with the number of accounts. \mat{CHECK: ticks copied from the SOAPS table; EfShard year changed to 2023 to match its bib entry (also fix in SOAPS); mixed bold/plain column headers kept from SOAPS.}
+No prior design meets all four.
+What is missing is a placement that reduces cross-shard transactions with bounded metadata, that any node can verify, and that is integrated with the consensus of the blockchain and its incentives, without every node redoing the computation.
+Part~III presents SOAPS, which addresses this gap.
+
+\begin{table}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\newcommand{\rotcol}[1]{\rotatebox[origin=lb]{60}{#1}}
+\begin{tabular}{>{\raggedright\arraybackslash}b{5.2cm}
+                >{\centering\arraybackslash}b{0.7cm}
+                *{6}{>{\centering\arraybackslash}b{0.55cm}}}
+\toprule
+\addlinespace[10pt]
+\textbf{Protocol} & \textbf{Year}
+  & \rotcol{\textbf{LB}}
+  & \rotcol{\textbf{CSR}}
+  & \rotcol{Auditable}
+  & \rotcol{Incentivized}
+  & \rotcol{\textbf{Adaptive}}
+  & \rotcol{\textbf{State-bounded}} \\
+\midrule
+Mizrahi and Rottenstreich~\cite{mizrahi2020blockchain} & 2020 & \yestick & \yestick & \notick & \notick & \yestick & \yestick \\
+Król \emph{et al.}~\cite{krol2021shard} (Shard Scheduler) & 2021 & \notick & \yestick & \partialtick & \partialtick & \yestick & \notick \\
+Toulouse \emph{et al.}~\cite{toulouse2022distributed} & 2022 & \yestick & \notick & \notick & \notick & \yestick & \notick \\
+Zhang \emph{et al.}~\cite{zhang2022community} & 2022 & \yestick & \yestick & \notick & \notick & \notick & \notick \\
+Li \emph{et al.}~\cite{li2022achieving} & 2022 & \yestick & \yestick & \notick & \notick & \yestick & \notick \\
+Zhang \emph{et al.}~\cite{txallo} (TxAllo) & 2023 & \yestick & \yestick & \notick & \notick & \yestick & \notick \\
+Mu and Wei~\cite{efShard} (EfShard) & 2023 & \yestick & \yestick & \yestick & \yestick & \yestick & \notick \\
+Wang \emph{et al.}~\cite{wang2024transshard} (TransShard) & 2024 & \yestick & \yestick & \partialtick & \notick & \yestick & \notick \\
+Li \emph{et al.}~\cite{li2024spring} (Spring) & 2024 & \yestick & \yestick & \notick & \notick & \yestick & \notick \\
+Haider \emph{et al.}~\cite{haider2025ai} & 2025 & \yestick & \yestick & \notick & \notick & \yestick & \partialtick \\
+Li \emph{et al.}~\cite{li2025novel} & 2025 & \yestick & \yestick & \notick & \notick & \partialtick & \notick \\
+Huang \emph{et al.}~\cite{huang2026shardcutter} (ShardCutter) & 2026 & \yestick & \yestick & \yestick & \notick & \yestick & \notick \\
+\rowcolor{verylightgray}
+\textbf{SOAPS (Part III)} & \textbf{2026} & \yestick & \yestick & \yestick & \yestick & \yestick & \yestick \\
+\bottomrule
+\end{tabular}
+\caption{Prior work on optimizing state placement in account-based sharded blockchains, compared against the criteria of \autoref{sec:bg:sharding:limitations}. LB and CSR stand for the \emph{load balancing} and \emph{cross-shard reduction} optimization targets; \partialtick{} means partial support.}
+\label{tab:bg:placement}
+\end{table}
 
 \section{Off-Chain Scaling: Layer 2}\label{sec:bg:l2}
 
-\begin{itemize}
-	\item The principle: run transactions off L1 but keep some or all of its security, using L1 for settlement and for publishing data~\cite{gudgeon2020sok}.
-	\begin{itemize}
-		\item Gudgeon et al.\ sort them into channels, sidechains/commit-chains and rollups~\cite{gudgeon2020sok}.
-		\item A good way to compare them is to ask what an honest user needs to get their funds back if the operator cheats.
-	\end{itemize}
-	\item L2s do not make L1 scaling unnecessary. They move the pressure onto publishing data on L1.
-	\begin{itemize}
-		\item That is Ethereum's ``rollup-centric'' roadmap: L1 becomes the place where rollups settle and publish their data.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Principle: run transactions off L1 but keep some or all of its security; L1 for settlement and data. Gudgeon et al.\ taxonomy.
+% 	\item Compare by what an honest user needs to get funds back if the operator cheats.
+% 	\item L2s move the pressure onto publishing data on L1 (rollup-centric roadmap).
+% \end{itemize}
+
+Sharding changes the layer-1 chain itself.
+The alternative is to leave the chain as it is and move transactions elsewhere.
+\emph{Layer-2} protocols run transactions outside the main chain, the \emph{layer~1}, and use it only to settle the outcome and, depending on the design, to publish the data needed to check that outcome~\cite{gudgeon2020sok}.
+Gudgeon et al.\ classify them into channels, commit-chains and sidechains, and rollups. \mat{CHECK: that Gudgeon et al.\ (FC 2020) actually cover rollups; if not, cite a more recent L2 survey (e.g., PANDAS cites Gangwal et al.\ 2023) for the taxonomy and for the rollup description.}
+They differ above all in how much of the security of layer~1 they keep~\cite{gudgeon2020sok}.
+A useful way to compare them is to ask what an honest user needs in order to recover their funds if the operator of the layer-2 protocol cheats or disappears.
+
+Layer-2 protocols do not make the scaling of layer~1 unnecessary.
+They move the pressure elsewhere: from executing transactions on layer~1 to publishing data on it.
+Ethereum made this explicit in 2020 with its \emph{rollup-centric} roadmap~\cite{buterin2020rollupcentric}.
+Execution scales through rollups, and layer~1 becomes the place where they settle and publish their data.
+This section presents rollups first, as the dominant design, then state channels and sidechains.
+It ends with the data availability problem that rollups raise.
 
 \subsection{Rollups}\label{sec:bg:l2:rollups}
 
-\begin{itemize}
-	\item A sequencer orders and executes transactions off chain, then posts compressed transaction data and state roots to L1~\cite{gudgeon2020sok}.
-	\begin{itemize}
-		\item A bridge contract on L1 holds the deposited funds and receives the state roots.
-		\item Today the sequencer is usually a single operator. Users can still force their transaction in through L1 if it censors them.
-	\end{itemize}
-	\item Everything relies on the data being \emph{available}: anyone must be able to rebuild the L2 state from it~\cite{albassam2021fraud}.
-	\item Use one concrete example, Optimism (or Arbitrum~\cite{kalodner2018arbitrum}). Keep it short here and go into detail in Part IV.
-	\begin{itemize}
-		\item In Optimism, the sequencer makes L2 blocks, a batcher posts them to L1 (as blobs now), and a proposer posts output roots. Anyone can rebuild the L2 chain from L1 data alone.
-		\item A figure would help: L2 users, sequencer, batches/blobs on L1, verifiers rebuilding the state.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Sequencer executes off chain, posts compressed data and state roots to L1; bridge contract; forced inclusion.
+% 	\item Everything relies on data availability.
+% 	\item Concrete example: Optimism (batcher, proposer). Figure would help.
+% \end{itemize}
+
+A rollup is a chain whose blocks are produced off layer~1 but whose state is anchored in it.
+A \emph{sequencer} receives the transactions of rollup users, orders and executes them, and periodically posts two things to layer~1.
+The first is the transaction data in compressed batches.
+The second is a commitment to the resulting rollup state, in the form of a state root~\cite{gudgeon2020sok}.
+A \emph{bridge} contract on layer~1 holds the assets that users deposited into the rollup and records the state roots, against which withdrawals are paid.
+In most rollups today, the sequencer is a single operator.
+It can delay or censor transactions, but users can force a transaction into the rollup by submitting it through layer~1.
+
+Optimism illustrates the structure~\cite{optimismspecs}.
+Its sequencer produces rollup blocks.
+A \emph{batcher} posts the data of these blocks to layer~1, as blobs since EIP-4844 (\autoref{sec:bg:l2:limitations}).
+A \emph{proposer} periodically posts output roots, commitments to the rollup state.
+Anyone can rebuild the whole rollup chain from the data on layer~1 alone, without trusting the sequencer. \mat{TODO: add a figure (users, sequencer, batches/blobs on L1, bridge, verifiers rebuilding the state).}
+
+This last property is what the security of a rollup rests on.
+A state root posted to layer~1 is only a commitment.
+To check that it is correct, or to know what one owns in order to withdraw, one must be able to recompute the state, and so the data must be \emph{available}: published, and retrievable by anyone who wants it~\cite{albassam2021fraud}.
+Rollups then differ in how layer~1 is convinced that the posted state roots are correct.
 
 \subsubsection{Optimistic Rollups}\label{sec:bg:l2:rollups:optimistic}
 
-\begin{itemize}
-	\item State roots are accepted unless someone challenges them with a fraud proof during a challenge window of about 7 days~\cite{kalodner2018arbitrum,gudgeon2020sok}.
-	\begin{itemize}
-		\item In Arbitrum the two parties bisect the disputed execution until only one instruction is left, which L1 then checks~\cite{kalodner2018arbitrum}.
-		\item The price of being optimistic is the long withdrawal delay.
-	\end{itemize}
-	\item Challengers need the data to recompute the disputed state.
-	\begin{itemize}
-		\item If the data is withheld, nobody can write a fraud proof, and an invalid root goes through.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item State roots accepted unless challenged with a fraud proof within ~7 days. Arbitrum bisection.
+% 	\item Challengers need the data; withheld data means no fraud proof.
+% \end{itemize}
+
+An optimistic rollup assumes that posted state roots are correct.
+A root is accepted unless someone challenges it with a \emph{fraud proof} during a challenge window, about seven days in deployed rollups such as Arbitrum and Optimism~\cite{kalodner2018arbitrum,ethoptimisticrollups}.
+Checking a fraud proof does not require layer~1 to re-execute a whole batch.
+In Arbitrum, the challenger and the party that posted the root bisect the disputed execution interactively, until they disagree on a single instruction, which the layer-1 contract then executes to settle the dispute~\cite{kalodner2018arbitrum}.
+A single honest participant watching the rollup is enough to stop an invalid state root.
+
+The price is latency.
+A withdrawal to layer~1 can only be paid once the window has passed, so users wait about a week, or pay a third party to advance them the funds.
+The scheme also depends entirely on data availability.
+To build a fraud proof, a challenger must recompute the disputed state from the batch data.
+If the sequencer posts a state root but withholds the corresponding data, nobody can prove the root wrong, and an invalid root is accepted at the end of the window.
 
 \subsubsection{Zero-Knowledge Rollups}\label{sec:bg:l2:rollups:zk}
 
-\begin{itemize}
-	\item Each batch comes with a validity proof (SNARK/STARK) checked on L1. Finality is fast, but proving is expensive~\cite{gudgeon2020sok}.
-	\begin{itemize}
-		\item Proving EVM execution is costly, and zkEVMs give up some compatibility to bring that cost down.
-	\end{itemize}
-	\item They still need data availability, so that users can rebuild the state and withdraw.
-	\begin{itemize}
-		\item A valid proof tells you the new state is correct, not what it contains. Users still need the data to know what they own.
-	\end{itemize}
-\end{itemize}
+% \begin{itemize}
+% 	\item Validity proof (SNARK/STARK) checked on L1; fast finality; proving expensive; zkEVM trade-offs.
+% 	\item Still need data availability for users to rebuild state and withdraw.
+% \end{itemize}
+
+A zero-knowledge rollup, or validity rollup, attaches to each batch a succinct proof, a SNARK or a STARK, that the new state root results from correctly executing the batch on the previous one.
+A contract on layer~1 verifies the proof, and the state root is final as soon as the proof is accepted, with no challenge window~\cite{gudgeon2020sok,ethzkrollups}.
+The cost moves to the prover.
+Generating a proof for EVM execution is expensive, and \emph{zkEVM} designs trade some compatibility with the EVM for faster proving.
+
+A validity proof removes the need for fraud proofs, but not the need for data.
+The proof shows that the new state is correct, not what it contains.
+Without the data, users cannot know their balances, build the Merkle proofs needed to withdraw, or take over if the operator disappears.
+Optimistic and zero-knowledge rollups alike therefore need their data to be available on layer~1.
 
 \subsection{State Channels}\label{sec:bg:l2:channels}
 
-\begin{itemize}
-	\item A fixed group of participants exchange updates off chain and settle on chain at the end, as in the Lightning Network~\cite{gudgeon2020sok}.
-	\begin{itemize}
-		\item The channel is opened on chain, signed state updates are exchanged off chain, and it is closed on chain. In a dispute, the latest signed state wins.
-		\item Payment networks route a payment across several channels.
-	\end{itemize}
-	\item Limitations: funds are locked, participants have to stay online, and the set of participants is fixed, so channels are not general-purpose.
-\end{itemize}
+% \begin{itemize}
+% 	\item Fixed group, off-chain updates, on-chain settlement (Lightning). Latest signed state wins. Payment networks.
+% 	\item Limitations: locked funds, online participants, fixed set.
+% \end{itemize}
+
+A state channel lets a fixed group of participants transact among themselves without touching the chain, except to open and close the channel~\cite{gudgeon2020sok}.
+The participants lock funds in a contract on layer~1 to open the channel.
+They then exchange signed updates of the channel state off chain, as often as they like, and close the channel by submitting the final state.
+If one of them submits an outdated state, the others have a dispute period to submit a more recent signed one, which takes precedence.
+The Lightning Network applies this to Bitcoin payments, and routes a payment across a path of channels so that two parties without a direct channel can still pay each other~\cite{poon2016lightning}.
+
+Within a channel, transactions are instant and cost nothing on chain.
+But funds stay locked for the lifetime of the channel, participants must stay online, or delegate to a watchtower, to react to disputes, and the set of participants is fixed in advance.
+Channels suit repeated payments between known parties, not general applications with many users interacting with shared contracts.
 
 \subsection{Sidechains}\label{sec:bg:l2:sidechains}
 
-\begin{itemize}
-	\item These are separate chains with their own consensus, connected to L1 by a bridge (e.g., Polygon PoS)~\cite{gudgeon2020sok}.
-	\begin{itemize}
-		\item Two-way peg: lock assets on L1 to mint them on the sidechain, and the other way round.
-	\end{itemize}
-	\item They do not get L1's security, and bridges have been hacked many times.
-	\begin{itemize}
-		\item Funds are only as safe as the sidechain validators or the bridge committee.
-	\end{itemize}
-	\item Use the comparison with rollups to explain why Ethereum's roadmap went with rollups.
-\end{itemize}
+% \begin{itemize}
+% 	\item Separate chains with own consensus, bridge to L1 (Polygon PoS); two-way peg.
+% 	\item No L1 security; bridges hacked. Comparison with rollups explains Ethereum's choice.
+% \end{itemize}
+
+A sidechain is a separate blockchain with its own consensus, connected to layer~1 by a bridge, Polygon PoS being an example~\cite{gudgeon2020sok}.
+Assets move between the two chains through a two-way peg.
+They are locked on layer~1 so that an equivalent amount can be minted on the sidechain, and burned on the sidechain to be released on layer~1.
+A sidechain can have its own parameters, with faster blocks, higher throughput or cheaper transactions, since it is not bound by the constraints of layer~1.
+
+It does not inherit the security of layer~1, however.
+Funds on a sidechain are only as safe as its validators, and funds in the bridge only as safe as the committee or contract that controls it.
+Bridges have suffered some of the largest thefts in the history of blockchains. \mat{TODO: cite a bridge-hack study or SoK (e.g., Ronin, Wormhole) for this claim.}
+Commit-chains such as Plasma sit between sidechains and rollups.
+They post only commitments to layer~1 and keep the data off chain, so when an operator withholds data, users must exit in time on their own~\cite{gudgeon2020sok}.
+
+The comparison explains the direction Ethereum has taken.
+A rollup inherits the security of layer~1 because everything needed to check it and to exit from it is on layer~1: the state roots, the proofs or the possibility of fraud proofs, and the data.
+Sidechains and commit-chains give up part of this, and channels are not general-purpose.
+Rollups thus became the main path for scaling execution on Ethereum~\cite{buterin2020rollupcentric}.
+That choice turns the data that rollups publish into the resource that layer~1 must scale.
 
 \subsection{Existing Layer 2 and Data Availability Solutions and Their Limitations}\label{sec:bg:l2:limitations}
 
-\begin{itemize}
-	\item The data availability problem: how do you check that published data can be retrieved without downloading all of it~\cite{albassam2021fraud}?
-	\begin{itemize}
-		\item You cannot prove that someone withheld data, so you cannot slash for it. This is what makes it different from the other faults seen so far.
-		\item Light clients need availability guarantees for fraud proofs to be useful~\cite{albassam2021fraud}.
-	\end{itemize}
-	\item EIP-4844 (blobs)~\cite{pigaglio2025pandas} gives rollups their own cheaper, temporary space for data. But every node still downloads every blob, so capacity is capped by node bandwidth.
-	\begin{itemize}
-		\item Blobs are large pieces of data attached to blocks, committed with KZG, not readable by the EVM, and deleted after a few weeks.
-		\item They have their own fee market and a small target and maximum number per block.
-	\end{itemize}
-	\item Data availability sampling: erasure-code the data and let each node sample a few random pieces. This gives probabilistic guarantees while each node downloads only a small part (details in Part IV)~\cite{albassam2021fraud,kate2010kzg}.
-	\begin{itemize}
-		\item With erasure coding, any large enough fraction of the data is enough to rebuild all of it, so an attacker has to hide a lot to cause harm.
-		\item If that much is hidden, a few random samples are enough to notice with high probability.
-		\item Then explain the two ways to make sure the encoding is correct: fraud proofs~\cite{albassam2021fraud}, or KZG commitments, which rule out bad encoding by construction~\cite{kate2010kzg}.
-	\end{itemize}
-	\item There are also separate DA layers (Celestia, EigenDA, Avail), with their own trust assumptions and timing.
-	\begin{itemize}
-		\item A rollup that uses them no longer gets Ethereum's guarantees on its data.
-	\end{itemize}
-	\item On the networking side, the options are GossipSub for dissemination and a DHT (Kademlia) for retrieval. PeerDAS is the first deployed step.
-	\begin{itemize}
-		\item With gossip you need one topic per column or row. That does not scale well with many topics, and duplicate messages waste bandwidth.
-		\item DHT lookups take several hops, which is too slow for 4\,s, and DHTs are exposed to Sybil and eclipse attacks.
-		\item PeerDAS has nodes keep a subset of columns and sample from their peers, but at a much smaller scale than the full design.
-	\end{itemize}
-	\item What is missing: a way to spread and sample the data before the 4\,s attestation deadline, at full Danksharding scale, while coping with faulty nodes and nodes that see different views of the network.
-	\item This is what Part IV addresses~\cite{pigaglio2025pandas}.
-\end{itemize}
+% \begin{itemize}
+% 	\item DA problem; calldata; EIP-4844 blobs; Danksharding; DAS; timing; DA layers; networking (PeerDAS, SubnetDAS, FullDAS, DHT, Honeybee); what is missing (Part IV).
+% \end{itemize}
+
+\paragraph{The data availability problem.}
+How can a node be sure that data published with a block can be retrieved, without downloading all of it~\cite{albassam2021fraud}?
+The question is harder than it looks, because withholding data is not an attributable fault.
+If a producer publishes only part of the data and a node complains, other nodes cannot tell whether the producer withheld it or the node raised a false alarm, since the producer can release the data just after the complaint.
+Unlike an invalid block or a double vote, withholding cannot be proven to others, and so cannot be punished by slashing~\cite{albassam2021fraud}.
+It must be detected instead, and every node must be able to detect it for itself.
+The same issue limits light clients.
+Fraud proofs protect them only if the data needed to build those proofs is available~\cite{albassam2021fraud}.
+
+\paragraph{From calldata to blobs.}
+Rollups first posted their data as \emph{calldata}, the input field of ordinary layer-1 transactions.
+This data competed with every other transaction for block space, paid the same gas price, and stayed in the history forever, although rollups only need it for a few weeks.
+EIP-4844, also called Proto-Danksharding, deployed in March 2024, introduced a dedicated space~\cite{eip4844}.
+Rollup data now travels in \emph{blobs} of 128\,KB, attached to blocks but not part of them.
+Blobs are committed to with KZG polynomial commitments~\cite{kate2010kzg}, cannot be read by the EVM, have their own fee market, and are deleted after 4{,}096 epochs, about 18 days.
+Every node still downloads every blob, however, which is why their number is kept small.
+The cap was 3 blobs per block as a target and 6 as a maximum at launch (0.375 and 0.75\,MB), raised to 6 and 9 with the Pectra upgrade~\cite{eip7691}. \TODO{check the current values before submission (Fusaka's BPO forks were scheduled to raise them to 10/15, then 14/21).}
+As \autoref{sec:bg:bottlenecks} showed, the bandwidth of ordinary nodes rules out going much further this way.
+
+\paragraph{Danksharding and data availability sampling.}
+Danksharding is Ethereum's target design for data availability: up to 32\,MB of blob data per block~\cite{ethdanksharding}.
+At that volume, no node downloads everything, and each one stores only a part of the data.
+A node that does not see all the data must still decide whether it is available before attesting to the block.
+\emph{Data availability sampling} (DAS) answers this with erasure coding~\cite{albassam2021fraud}.
+The data is extended with redundancy so that any large enough fraction of it suffices to reconstruct all of it.
+An adversary who wants to make the data unrecoverable must then withhold a large fraction, and a node that requests a few randomly chosen pieces notices with high probability.
+
+In Danksharding, the blob data is arranged in a $256 \times 256$ matrix of 512\,B cells and extended with a two-dimensional Reed--Solomon code to a $512 \times 512$ matrix, in which any row or column can be rebuilt from half of its cells.
+To make such data unrecoverable, an adversary must withhold at least $257^2$ of the $512^2$ cells, about 25\% of them~\cite{albassam2021fraud}.
+A node that samples $s$ cells uniformly at random then misses the withholding with probability at most $0.75^{s}$.
+The 73 samples planned for each node bring this below $10^{-9}$. \mat{CHECK: own computation ($(1-257^2/512^2)^{73} \approx 6\times10^{-10}$, sampling with replacement); confirm this matches how the 73-sample target was derived.} \TODO{cite the source of the 73-sample figure (PANDAS takes it from an Ethereum community DAS query-analysis notebook)}
+Each cell carries a 48\,B KZG proof that binds it to the commitment of the blob, so the extended data is about 140\,MB per block.
+These proofs also settle a second question: whether the producer encoded the data correctly.
+Al-Bassam et al.\ handle incorrect encoding with fraud proofs~\cite{albassam2021fraud}, whereas KZG commitments rule it out by construction, since a cell that does not match the committed polynomial fails verification~\cite{kate2010kzg}.
+Encoding 32\,MB and sending out 140\,MB every 12 seconds is far beyond an ordinary node.
+Danksharding therefore assigns this work to the builder, which proposer-builder separation already makes a powerful, well-connected actor (\autoref{sec:bg:eth-pos:safeguards})~\cite{heimbach2023pbs,feist2022newsharding,ethdanksharding}.
+Part~IV relies on the builder for exactly this step.
+
+\paragraph{The timing constraint.}
+In Ethereum, availability must be decided within consensus.
+Attesters vote on a block within the first 4 seconds of its 12-second slot (\autoref{sec:bg:eth-pos:slots}).
+Under a \emph{tight} fork-choice rule, a node checks availability before attesting, so a block is never voted for if its data is missing.
+A \emph{trailing} rule would let availability be checked later, but an attestation could then have to be reverted when the data turns out to be missing~\cite{damato2024dasforkchoice}.
+Changing consensus to allow this opens the door to ex-ante reorganization attacks~\cite{damato2024rlmd}.
+To leave consensus unchanged, the data must therefore be disseminated and sampled within those 4 seconds, by every node, for every block.
+
+\paragraph{Separate data availability layers.}
+Some systems provide data availability as a separate blockchain.
+DAS was introduced by Al-Bassam et al.~\cite{albassam2021fraud} and taken up by LazyLedger~\cite{albassam2019lazyledger}, which became Celestia~\cite{celestia}.
+In Celestia, validators act as resourceful nodes that store the complete data, and light clients sample from them, so the cost of the validators grows linearly with the data volume and the number of samplers.
+ACeD instead has a group of oracle nodes store the coded data, assuming that at least half of them are honest~\cite{sheng2021aced}.
+Other services such as EigenDA and Avail follow similar ideas, each with its own trust assumptions and timing. \mat{TODO: cite EigenDA and Avail or drop them.}
+A rollup that publishes its data on such a layer no longer gets the guarantees of Ethereum on its data, which is why we focus on data availability within Ethereum itself.
+
+\paragraph{Networking for DAS in Ethereum.}
+Within Ethereum, the open question is how to disseminate the cells and sample them over the peer-to-peer network.
+The building blocks available are GossipSub~\cite{vyzovitis2020gossipsub}, which disseminates blocks and attestations, and the Kademlia DHT~\cite{maymounkov2002kademlia}, which supports node discovery.
+PeerDAS~\cite{ryan2023peerdas,eip7594} is the first step toward DAS, deployed with the Fusaka upgrade in December 2025. \mat{CHECK: Fusaka activation date and PeerDAS parameters (128 column subnets) at submission time.}
+It uses only one-dimensional, row-wise erasure coding and samples by \emph{column}, a vertical slice across all blobs.
+Each of 128 GossipSub subnets carries one column, and nodes are statically assigned to the subnets whose columns they keep and check.
+This works for a moderate number of blobs, but dissemination by gossip does not scale to 32\,MB per block.
+Every additional topic adds overhead, and redundant copies of messages waste bandwidth.
+
+Other proposals go further, but remain incomplete.
+SubnetDAS adds two-dimensional coding and assigns each validator a row and a column rather than random samples~\cite{damato2023subnetdas}.
+Attesting only on what one was assigned weakens the guarantee, since a validator may attest although much of the data is missing.
+FullDAS combines gossip dissemination with request-response sampling for large blobs, but its sampling process is only sketched.
+How custody is assigned, which transport is used, and how timing is met are left unspecified~\cite{kiraly2024fulldas}.
+Retrieving cells through the DHT is no better.
+Lookups take several hops, and seeding cells to nodes through Kademlia incurs high overhead~\cite{cortes2024kademlia}. \mat{CHECK: Cortes-Goicoechea et al.\ show DHT seeding overhead; ``too slow for 4\,s'' may be stronger than what they claim. Also find a venue/URL for the bib entry.}
+DHTs are also exposed to Sybil and eclipse attacks~\cite{marcus2018eclipse,henningsen2019eclipsing}.
+Honeybee makes peer sampling resistant to Sybils with verifiable random walks~\cite{zhang2024honeybee}, but checking each hop interactively adds latency that tight deadlines cannot afford. \mat{CHECK: Honeybee's arXiv title changed (v4: ``Byzantine Tolerant Decentralized Peer Sampling with Verifiable Random Walks''); update bib if the final version is cited.}
+
+\paragraph{What is missing.}
+No existing design disseminates and samples data at the scale of Danksharding within the 4 seconds that Ethereum's consensus allows.
+Such a design must also tolerate faulty and unresponsive nodes, and nodes that see different views of the network.
+It must stay within the hardware and bandwidth recommended for Ethereum nodes~\cite{eip7870}, and must not change the consensus protocol.
+Part~IV presents PANDAS, which addresses this gap~\cite{pigaglio2025pandas}.
