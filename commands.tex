@@ -47,3 +47,14 @@
 \newcommand{\addaddr}{{\sc Add Addr}\xspace}
 \newcommand{\removeaddr}{{\sc Remove Addr}\xspace}
 \newcommand{\fastclose}{{\sc Fast Close}\xspace}
+% Capitalized names for \autoref (e.g. "Section 1.4.2" rather than "subsection 1.4.2")
+\addto\extrasenglish{%
+	\def\chapterautorefname{Chapter}%
+	\def\sectionautorefname{Section}%
+	\def\subsectionautorefname{Section}%
+	\def\subsubsectionautorefname{Section}%
+}
+
+% Line spacing (triple)
+\usepackage{setspace}
+\setstretch{3}

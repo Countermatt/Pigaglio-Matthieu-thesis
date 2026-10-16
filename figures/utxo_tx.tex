@@ -1,0 +1,19 @@
+\definecolor{utxospent}{RGB}{214,96,77}
+\definecolor{utxonew}{RGB}{77,146,33}
+\definecolor{utxotx}{RGB}{67,147,195}
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+	utxobox/.style={draw,rounded corners=2pt,minimum width=2.6cm,minimum height=0.75cm,align=center},
+	txbox/.style={draw,thick,fill=utxotx!20,minimum width=1.8cm,minimum height=2.1cm,align=center}]
+	\node[utxobox,fill=utxospent!25] (i1) at (0,0.6) {output of $tx_a$\\5 coins, Alice};
+	\node[utxobox,fill=utxospent!25] (i2) at (0,-0.6) {output of $tx_b$\\3 coins, Alice};
+	\node[txbox] (t) at (3.4,0) {$tx$\\[2pt]signed\\by Alice};
+	\node[utxobox,fill=utxonew!25] (o1) at (6.8,0.6) {output 0\\6 coins, Bob};
+	\node[utxobox,fill=utxonew!25] (o2) at (6.8,-0.6) {output 1\\1.9 coins, Alice};
+	\draw[->,thick] (i1.east) -- (t.west |- i1.east);
+	\draw[->,thick] (i2.east) -- (t.west |- i2.east);
+	\draw[->,thick] (t.east |- o1.west) -- (o1.west);
+	\draw[->,thick] (t.east |- o2.west) -- (o2.west);
+	\node[text=utxospent!80!black] at (0,1.35) {consumed (spent)};
+	\node[text=utxonew!80!black] at (6.8,1.35) {created (unspent)};
+	\node at (3.4,-1.45) {fee: $5 + 3 - 6 - 1.9 = 0.1$ coins};
+\end{tikzpicture}

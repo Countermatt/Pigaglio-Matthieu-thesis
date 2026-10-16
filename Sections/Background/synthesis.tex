@@ -1,0 +1,50 @@
+%==============================================================================
+\chapter{Synthesis and Motivation}\label{ch:bg:synthesis}
+%==============================================================================
+
+\begin{itemize}
+	\item A short chapter, a few pages, to close Part I: go from the limitations of \autoref{ch:bg:scalability} to the research questions.
+\end{itemize}
+
+\section{Open Challenges}\label{sec:bg:challenges}
+
+\begin{itemize}
+	\item C1: the designs above assume the workload has good locality, but this is rarely checked on real, recent data. This is Part II~\cite{pigaglio2023exploring}.
+	\begin{itemize}
+		\item Sharding, parallel execution and stateless clients are mostly evaluated on synthetic or short traces.
+		\item The question: can solid assumptions about the near future be drawn from historical data?
+	\end{itemize}
+	\item C2: state placement has to cut cross-shard transactions while keeping its metadata small, staying verifiable, and not letting anyone tilt it in their favour. This is Part III.
+	\begin{itemize}
+		\item It should fit into the existing consensus and its safeguards, without a trusted coordinator.
+	\end{itemize}
+	\item C3: L2 data availability has to be checked by sampling, within consensus timing, over an open P2P network. This is Part IV.
+	\begin{itemize}
+		\item The constraints: a hard 4\,s deadline, tens of thousands of nodes, some of them faulty or unresponsive, and no new consensus step.
+	\end{itemize}
+\end{itemize}
+
+\section{Common Requirements for L1 and L2 Sharding}\label{sec:bg:requirements}
+
+\begin{itemize}
+	\item Verifiable: any node must be able to recompute who is assigned what (accounts to shards, cells to nodes), with no trusted third party.
+	\begin{itemize}
+		\item This uses the same trick as Ethereum committees: deterministic functions of public randomness and public state (\autoref{sec:bg:eth-pos:committees}).
+	\end{itemize}
+	\item Flexible: able to adapt in large, changing systems (the workload evolves, nodes join and leave, some fail).
+	\begin{itemize}
+		\item Fully deterministic schemes are too rigid, and fully ad-hoc ones cannot be checked. My designs try to sit in between.
+	\end{itemize}
+	\item Decentralized: no heavy new consensus step, low cost per node, anyone can participate.
+	\item Practical: evaluated on real Ethereum workloads and timing, and compatible with the existing protocols.
+\end{itemize}
+
+\section{Positioning of the Contributions}\label{sec:bg:positioning}
+
+\begin{itemize}
+	\item SOAPS shards computation on L1. It removes contention on execution and state, and it benefits from knowing the workload (Part II).
+	\item PANDAS~\cite{pigaglio2025pandas} shards the L2 data. It removes the bandwidth bottleneck for data availability, and it barely depends on the workload.
+	\item The two complement each other rather than compete: a sharded L1 still has to host L2 data, and an L1 full of rollups still gains from parallel execution.
+	\item A figure would help: L1 vs.\ L2 on one axis, computation vs.\ data on the other, with Parts II to IV placed on it.
+	\item End with a short roadmap of Parts II to IV.
+\end{itemize}
